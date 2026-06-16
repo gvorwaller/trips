@@ -67,3 +67,17 @@ export async function validateSession(token: string): Promise<SessionUser | null
 export async function destroySession(token: string): Promise<void> {
 	await query('DELETE FROM sessions WHERE id = $1', [token]);
 }
+
+/**
+ * Invalidate a user's sessions after a password change. Pass `exceptToken` to
+ * keep the caller's own session alive (used when the owner changes their own
+ * password); omit it to force the user off everywhere (used when the owner
+ * resets the viewer's password).
+ */
+export async function destroyUserSessions(userId: number, exceptToken?: string): Promise<void> {
+	if (exceptToken) {
+		await query('DELETE FROM sessions WHERE user_id = $1 AND id <> $2', [userId, exceptToken]);
+	} else {
+		await query('DELETE FROM sessions WHERE user_id = $1', [userId]);
+	}
+}

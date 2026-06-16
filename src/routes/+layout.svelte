@@ -16,6 +16,9 @@
 		<nav class="links">
 			<a href="/" class:active={active('/')}>Trips</a>
 			<a href="/search" class:active={active('/search')}>Search</a>
+			{#if !isViewer}
+				<a href="/settings" class:active={active('/settings')}>Settings</a>
+			{/if}
 		</nav>
 		<span class="spacer"></span>
 		<span class="user">
@@ -41,6 +44,7 @@
 		<a href="/search" class:active={active('/search')}><span class="ico">🔍</span>Search</a>
 		{#if !isViewer}
 			<a href="/trips/new" class:active={active('/trips/new')}><span class="ico">＋</span>New</a>
+			<a href="/settings" class:active={active('/settings')}><span class="ico">⚙</span>Settings</a>
 		{/if}
 	</nav>
 {/if}
