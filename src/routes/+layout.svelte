@@ -15,6 +15,7 @@
 		<a class="brand" href="/">trips</a>
 		<nav class="links">
 			<a href="/" class:active={active('/')}>Trips</a>
+			<a href="/search" class:active={active('/search')}>Search</a>
 		</nav>
 		<span class="spacer"></span>
 		<span class="user">
@@ -37,6 +38,7 @@
 {#if data.user}
 	<nav class="bottom-nav">
 		<a href="/" class:active={active('/')}><span class="ico">🧳</span>Trips</a>
+		<a href="/search" class:active={active('/search')}><span class="ico">🔍</span>Search</a>
 		{#if !isViewer}
 			<a href="/trips/new" class:active={active('/trips/new')}><span class="ico">＋</span>New</a>
 		{/if}
