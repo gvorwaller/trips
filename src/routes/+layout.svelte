@@ -1,14 +1,44 @@
 <script lang="ts">
+	import { page } from '$app/state';
 	import '../app.css';
-	let { children } = $props();
+
+	let { data, children } = $props();
+	const isViewer = $derived(data.user?.role === 'viewer');
+	const path = $derived(page.url.pathname);
+	function active(prefix: string): boolean {
+		return prefix === '/' ? path === '/' : path.startsWith(prefix);
+	}
 </script>
 
-<div class="app">
-	<header class="topnav">
+{#if data.user}
+	<header class="top-nav">
 		<a class="brand" href="/">trips</a>
+		<nav class="links">
+			<a href="/" class:active={active('/')}>Trips</a>
+		</nav>
+		<span class="spacer"></span>
+		<span class="user">
+			{data.user.display_name}{#if isViewer}<span class="role-tag">viewer</span>{/if}
+		</span>
+		<form class="logout" method="POST" action="/login?/logout">
+			<button class="signout" type="submit">Sign out</button>
+		</form>
 	</header>
 
-	<main class="page">
-		{@render children()}
-	</main>
-</div>
+	{#if isViewer}
+		<div class="readonly-banner">Read-only view — you can browse and check off packing.</div>
+	{/if}
+{/if}
+
+<main class="page">
+	{@render children()}
+</main>
+
+{#if data.user}
+	<nav class="bottom-nav">
+		<a href="/" class:active={active('/')}><span class="ico">🧳</span>Trips</a>
+		{#if !isViewer}
+			<a href="/trips/new" class:active={active('/trips/new')}><span class="ico">＋</span>New</a>
+		{/if}
+	</nav>
+{/if}
