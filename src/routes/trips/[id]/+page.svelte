@@ -57,6 +57,21 @@
 		return f((start ?? end) as string);
 	}
 
+	function fmtSize(bytes: number): string {
+		if (bytes < 1024) return `${bytes} B`;
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+	}
+	function fmtDateTime(s: string | null): string {
+		if (!s) return '';
+		return new Date(s).toLocaleString(undefined, {
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	}
+
 	// Optimistic packing check-off (works for owner + viewer via the API route).
 	async function toggleCheck(id: number, checked: boolean) {
 		const res = await fetch('/api/packing/check', {
@@ -314,6 +329,140 @@
 	{/if}
 </div>
 
+<!-- ── RESERVATIONS ───────────────────────────────────── -->
+<div class="card">
+	<h2>Reservations</h2>
+	{#if data.reservations.length === 0}
+		<p class="muted">No reservations yet.</p>
+	{:else}
+		<ul class="outline">
+			{#each data.reservations as r (r.id)}
+				<li>
+					<div class="line">
+						<span class="badge need">{r.reservation_type}</span>
+						<span class="grow">
+							<span class="ttl">{r.title}</span>
+							<div class="meta">
+								{#if r.confirmation_code}Conf: {r.confirmation_code} ·
+								{/if}
+								{#if r.status}{r.status} ·
+								{/if}
+								{#if r.start_at}{fmtDateTime(r.start_at)}{/if}
+								{#if r.end_at}
+									→ {fmtDateTime(r.end_at)}{/if}
+							</div>
+							{#if r.notes}<div class="meta">{r.notes}</div>{/if}
+						</span>
+						{#if !isViewer}
+							<form method="POST" action="?/res-delete" use:enhance>
+								<input type="hidden" name="id" value={r.id} />
+								<button type="submit" class="del" title="delete">✕</button>
+							</form>
+						{/if}
+					</div>
+					{#if !isViewer}
+						<details class="edit">
+							<summary>edit</summary>
+							<form method="POST" action="?/res-edit" use:enhance class="edit-form">
+								<input type="hidden" name="id" value={r.id} />
+								<select name="reservation_type" aria-label="type">
+									{#each ['accommodation', 'flight', 'restaurant', 'transport', 'other'] as t (t)}
+										<option value={t} selected={r.reservation_type === t}>{t}</option>
+									{/each}
+								</select>
+								<input name="title" value={r.title} placeholder="Title" />
+								<input
+									name="confirmation_code"
+									value={r.confirmation_code ?? ''}
+									placeholder="Confirmation code"
+								/>
+								<input name="status" value={r.status ?? ''} placeholder="Status" />
+								<label class="dt"
+									>Start <input
+										type="datetime-local"
+										name="start_at"
+										value={r.start_at ?? ''}
+									/></label
+								>
+								<label class="dt"
+									>End <input type="datetime-local" name="end_at" value={r.end_at ?? ''} /></label
+								>
+								<textarea name="notes" rows="2" placeholder="Notes">{r.notes ?? ''}</textarea>
+								<button class="btn small primary" type="submit">Save</button>
+							</form>
+						</details>
+					{/if}
+				</li>
+			{/each}
+		</ul>
+	{/if}
+
+	{#if !isViewer}
+		<details class="paste">
+			<summary>Add reservation</summary>
+			<form method="POST" action="?/res-add" use:enhance class="edit-form">
+				<select name="reservation_type" aria-label="type">
+					{#each ['accommodation', 'flight', 'restaurant', 'transport', 'other'] as t (t)}
+						<option value={t}>{t}</option>
+					{/each}
+				</select>
+				<input name="title" placeholder="Title (e.g. Hôtel d'Europe)" required />
+				<input name="confirmation_code" placeholder="Confirmation code" />
+				<label class="dt">Start <input type="datetime-local" name="start_at" /></label>
+				<label class="dt">End <input type="datetime-local" name="end_at" /></label>
+				<textarea name="notes" rows="2" placeholder="Notes"></textarea>
+				<button class="btn small primary" type="submit">Add reservation</button>
+			</form>
+		</details>
+	{/if}
+</div>
+
+<!-- ── ATTACHMENTS ────────────────────────────────────── -->
+<div class="card">
+	<h2>Documents</h2>
+	{#if data.attachments.length === 0}
+		<p class="muted">No documents yet.</p>
+	{:else}
+		<ul class="outline">
+			{#each data.attachments as a (a.id)}
+				<li>
+					<div class="line">
+						<span class="grow">
+							<a
+								class="ttl"
+								href="/trips/{data.trip.id}/attachments/{a.id}"
+								target="_blank"
+								rel="noopener">{a.original_name}</a
+							>
+							<div class="meta">{a.mime_type} · {fmtSize(a.size_bytes)}</div>
+						</span>
+						{#if !isViewer}
+							<form method="POST" action="?/attach-delete" use:enhance>
+								<input type="hidden" name="id" value={a.id} />
+								<button type="submit" class="del" title="delete">✕</button>
+							</form>
+						{/if}
+					</div>
+				</li>
+			{/each}
+		</ul>
+	{/if}
+
+	{#if !isViewer}
+		<form
+			method="POST"
+			action="?/attach-upload"
+			use:enhance
+			enctype="multipart/form-data"
+			class="add-row"
+		>
+			<input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif" required />
+			<button class="btn small primary" type="submit">Upload</button>
+		</form>
+		<p class="muted" style="font-size: 0.78rem">PDF or image, up to 30 MB. Stored privately.</p>
+	{/if}
+</div>
+
 <!-- ── Trip actions ───────────────────────────────────── -->
 {#if !isViewer}
 	<div class="form-actions">
@@ -455,6 +604,16 @@
 		display: grid;
 		gap: 6px;
 		margin: 6px 0 10px;
+	}
+	.edit-form .dt {
+		font-size: 0.85rem;
+		color: var(--muted);
+		display: flex;
+		gap: 8px;
+		align-items: center;
+	}
+	.edit-form .dt input {
+		flex: 1;
 	}
 	.add-row {
 		display: flex;

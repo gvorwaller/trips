@@ -31,6 +31,15 @@ import {
 import { duplicateTrip } from '$server/clone';
 import { runTreeOp, type TreeOp } from '$server/tree-sql';
 import { flattenTree } from '$server/tree';
+import {
+	listReservations,
+	createReservation,
+	updateReservation,
+	deleteReservation,
+	parseReservationForm
+} from '$server/reservations';
+import { listAttachmentsForTrip, uploadAttachment, deleteAttachment } from '$server/attachments';
+import { MAX_ATTACHMENT_BYTES } from '$lib/filevalidate';
 
 function parseId(param: string | FormDataEntryValue | null): number {
 	const id = Number(param);
@@ -63,11 +72,13 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	const trip = await getTrip(ownerId, tripId);
 	if (!trip) throw error(404, 'Trip not found');
 
-	const [itinerary, lists, itemsByList, templates] = await Promise.all([
+	const [itinerary, lists, itemsByList, templates, reservations, attachments] = await Promise.all([
 		listItinerary(tripId),
 		listPackingLists(tripId),
 		getPackingItemsForTrip(tripId),
-		listTemplates(ownerId)
+		listTemplates(ownerId),
+		listReservations(tripId),
+		listAttachmentsForTrip(tripId)
 	]);
 
 	const itineraryRows = flattenTree(itinerary);
@@ -76,7 +87,7 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		const checked = items.filter((i) => i.checked).length;
 		return { list, rows: flattenTree(items), total: items.length, checked };
 	});
-	return { trip, itineraryRows, packing, templates };
+	return { trip, itineraryRows, packing, templates, reservations, attachments };
 };
 
 /** Resolve trip and assert ownership for an action; returns {ownerId, tripId}. */
@@ -270,6 +281,65 @@ export const actions: Actions = {
 		const name = (form.get('name') ?? '').toString().trim();
 		if (!name) return fail(400, { error: 'Template name is required.' });
 		await saveListAsTemplate(ownerId, parseId(form.get('list_id')), name);
+		return { ok: true };
+	},
+
+	// ── Reservations ───────────────────────────────────────
+	'res-add': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const { input, error: e } = parseReservationForm(form);
+		if (!input) return fail(400, { error: e });
+		await createReservation(tripId, input);
+		return { ok: true };
+	},
+
+	'res-edit': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const { input, error: e } = parseReservationForm(form);
+		if (!input) return fail(400, { error: e });
+		await updateReservation(tripId, parseId(form.get('id')), input);
+		return { ok: true };
+	},
+
+	'res-delete': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		await deleteReservation(tripId, parseId(form.get('id')));
+		return { ok: true };
+	},
+
+	// ── Attachments ────────────────────────────────────────
+	'attach-upload': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const file = form.get('file');
+		if (!(file instanceof File) || file.size === 0) {
+			return fail(400, { error: 'Choose a file to upload.' });
+		}
+		if (file.size > MAX_ATTACHMENT_BYTES) {
+			return fail(400, { error: 'File exceeds the 30 MB limit.' });
+		}
+		const bytes = new Uint8Array(await file.arrayBuffer());
+		const result = await uploadAttachment(tripId, file.name, bytes, {
+			reservation_id: optId(form.get('reservation_id'))
+		});
+		if (!result.ok) return fail(result.status, { error: result.error });
+		return { ok: true };
+	},
+
+	'attach-delete': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const ok = await deleteAttachment(tripId, parseId(form.get('id')));
+		if (!ok)
+			return fail(502, { error: 'Could not delete the file from storage; marked for retry.' });
 		return { ok: true };
 	},
 
