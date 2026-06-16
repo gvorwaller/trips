@@ -18,3 +18,7 @@ vite.config.js.timestamp-*
 .sidecar-start.sh
 .sidecar-base
 .td-root
+
+# Claude Code: track shared commands, ignore per-machine state (matches siblings)
+.claude/settings.local.json
+.claude/worktrees/
