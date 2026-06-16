@@ -1,0 +1,131 @@
+<!doctype html>
+<!--
+  trips UI mockup — visual reference for the V3 plan. Mobile-first.
+  Static HTML only (no JS). Open directly in a browser; serve docs/mockups on
+  127.0.0.1:8431 if testing alongside the shared Maps key.
+  Shows: trip detail with bottom nav (Overview / Places / Packing / Reservations / More),
+  the places outliner, and the packing outliner with progress + check-off.
+-->
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<title>trips — mockup</title>
+		<link rel="stylesheet" href="mockup.css" />
+		<style>
+			.outline { list-style: none; margin: 0; padding: 0; }
+			.outline li { border-top: 1px solid var(--border); }
+			.outline .row {
+				display: flex; align-items: center; gap: 10px;
+				min-height: 48px; padding: 8px 4px;
+			}
+			.outline .indent-1 { padding-left: 24px; }
+			.outline .indent-2 { padding-left: 48px; }
+			.handle { color: var(--muted); cursor: grab; user-select: none; }
+			.section-title { font-weight: 700; color: var(--accent); }
+			.muted { color: var(--muted); font-size: 0.9rem; }
+			.chip {
+				display: inline-flex; align-items: center; gap: 4px;
+				font-size: 0.8rem; padding: 2px 8px; border-radius: 999px;
+				background: var(--accent-soft); color: var(--accent); text-decoration: none;
+			}
+			.progress { height: 8px; background: var(--border); border-radius: 999px; overflow: hidden; }
+			.progress > span { display: block; height: 100%; background: var(--accent); width: 60%; }
+			.check { width: 22px; height: 22px; }
+			.checked .name { text-decoration: line-through; color: var(--muted); }
+			.capture {
+				display: flex; gap: 8px; margin: 12px 0;
+			}
+			.capture input { flex: 1; font-size: 16px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+		</style>
+	</head>
+	<body>
+		<header class="top-nav">
+			<strong class="brand">trips</strong>
+			<span class="spacer"></span>
+			<span class="user">Provence · Jul 27–Aug 5</span>
+		</header>
+
+		<main class="page" style="padding-bottom: calc(var(--bottomnav-h) + 16px)">
+			<!-- Quick-capture bar (hero interaction): URL → place, multi-line → packing -->
+			<div class="capture">
+				<input placeholder="Paste a link or type to add…" />
+				<button class="btn primary">Add</button>
+			</div>
+
+			<!-- PLACES outliner -->
+			<section class="card" style="margin-bottom: 16px">
+				<h2 style="margin-top: 0">Places</h2>
+				<ul class="outline">
+					<li>
+						<div class="row">
+							<span class="handle">⠿</span>
+							<span class="section-title">Day 1 — Avignon</span>
+						</div>
+					</li>
+					<li>
+						<div class="row indent-1">
+							<span class="handle">⠿</span>
+							<span class="grow">Palais des Papes
+								<div class="muted">Gothic papal palace · 2h</div>
+							</span>
+							<a class="chip" href="#">Maps</a>
+							<a class="chip" href="#">Site</a>
+						</div>
+					</li>
+					<li>
+						<div class="row indent-1">
+							<span class="handle">⠿</span>
+							<span class="grow">Pont Saint-Bénézet</span>
+							<a class="chip" href="#">Directions</a>
+						</div>
+					</li>
+				</ul>
+			</section>
+
+			<!-- PACKING outliner -->
+			<section class="card">
+				<h2 style="margin-top: 0">Packing — Carry-on</h2>
+				<div class="progress" aria-label="6 of 10 packed"><span></span></div>
+				<p class="muted">6 of 10 packed</p>
+				<ul class="outline">
+					<li>
+						<div class="row"><span class="section-title">Documents</span></div>
+					</li>
+					<li class="checked">
+						<div class="row indent-1">
+							<input class="check" type="checkbox" checked />
+							<span class="grow name">Passports ×2</span>
+						</div>
+					</li>
+					<li>
+						<div class="row indent-1">
+							<input class="check" type="checkbox" />
+							<span class="grow name">Boarding passes (PDF attached)</span>
+							<a class="chip" href="#">📎</a>
+						</div>
+					</li>
+					<li>
+						<div class="row"><span class="section-title">Electronics</span></div>
+					</li>
+					<li>
+						<div class="row indent-1">
+							<input class="check" type="checkbox" />
+							<span class="grow name">Chargers</span>
+							<span class="muted">×3</span>
+						</div>
+					</li>
+				</ul>
+			</section>
+		</main>
+
+		<!-- Bottom nav (phone) -->
+		<nav class="bottom-nav">
+			<a href="#" class="active">Overview</a>
+			<a href="#">Places</a>
+			<a href="#">Packing</a>
+			<a href="#">Stays</a>
+			<a href="#">More</a>
+		</nav>
+	</body>
+</html>

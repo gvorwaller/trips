@@ -1,0 +1,10 @@
+-- Runtime grants for trips_app (migrations run as trips_owner).
+
+GRANT USAGE ON SCHEMA public TO trips_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO trips_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO trips_app;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE trips_owner IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO trips_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE trips_owner IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO trips_app;

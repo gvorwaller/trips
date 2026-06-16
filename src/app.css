@@ -1,0 +1,73 @@
+/* trips global tokens — adapted from birds docs/mockups/mockup.css.
+   Component styling lives in component-scoped <style> blocks (no Tailwind). */
+:root {
+	--bg: #f8f9fa;
+	--card: #ffffff;
+	--border: #e9ecef;
+	--text: #212529; /* 16.1:1 */
+	--muted: #495057; /* 7.5:1 */
+	--accent: #0a5c43; /* 7.6:1 */
+	--accent-soft: #e3f3ec;
+	--link: #084298; /* 9.3:1 */
+	--danger: #842029;
+	--nav-h: 56px;
+	--bottomnav-h: 64px;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+	background: var(--bg);
+	color: var(--text);
+	font-family:
+		system-ui,
+		-apple-system,
+		'Segoe UI',
+		Roboto,
+		Helvetica,
+		Arial,
+		sans-serif;
+	font-size: 16px;
+	line-height: 1.5;
+}
+
+a {
+	color: var(--link);
+}
+
+.topnav {
+	position: sticky;
+	top: 0;
+	height: var(--nav-h);
+	display: flex;
+	align-items: center;
+	padding: 0 16px;
+	background: var(--card);
+	border-bottom: 1px solid var(--border);
+	z-index: 10;
+}
+
+.brand {
+	font-weight: 700;
+	color: var(--accent);
+	text-decoration: none;
+	font-size: 1.25rem;
+}
+
+.page {
+	max-width: 1100px;
+	margin: 0 auto;
+	padding: 16px;
+}
+
+.card {
+	background: var(--card);
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	padding: 16px;
+}
