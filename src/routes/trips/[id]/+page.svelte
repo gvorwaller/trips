@@ -1,11 +1,48 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
+	import PinMap from '$components/PinMap.svelte';
+	import {
+		googleMapsLink,
+		appleMapsLink,
+		googleDirectionsLink,
+		googleDayDirectionsLink,
+		type MapPlace
+	} from '$lib/maplinks';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
 	const isViewer = $derived(data.user?.role === 'viewer');
 	let confirming = $state(false);
+	let selectedPin = $state<number | null>(null);
+
+	type ItinNode = PageData['itineraryRows'][number]['node'];
+	const toPlace = (n: ItinNode): MapPlace => ({
+		name: n.title,
+		lat: n.lat,
+		lon: n.lon,
+		place_id: n.place_id
+	});
+
+	// Pins for the map: places that have coordinates.
+	const pins = $derived(
+		data.itineraryRows
+			.filter((r) => r.node.lat != null && r.node.lon != null)
+			.map((r) => ({ id: r.node.id, title: r.node.title, lat: r.node.lat!, lon: r.node.lon! }))
+	);
+
+	// Multi-stop "directions for the day" for a day/section: its direct child places in order.
+	function dayDirections(parentId: number): string | null {
+		const places = data.itineraryRows
+			.filter((r) => r.node.parent_id === parentId && r.node.item_type === 'place')
+			.map((r) => toPlace(r.node));
+		return googleDayDirectionsLink(places);
+	}
+
+	function selectPin(id: number) {
+		selectedPin = id;
+		document.getElementById(`itin-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+	}
 
 	function fmtRange(start: string | null, end: string | null): string {
 		if (!start && !end) return 'No dates set';
@@ -68,33 +105,67 @@
 <!-- ── PLACES ─────────────────────────────────────────── -->
 <div class="card">
 	<h2>Places</h2>
+
+	{#if data.itineraryRows.length > 0}
+		<PinMap {pins} onselect={selectPin} />
+	{/if}
+
 	{#if data.itineraryRows.length === 0}
 		<p class="muted">No places yet.</p>
 	{:else}
 		<ul class="outline">
 			{#each data.itineraryRows as { node, depth } (node.id)}
-				<li style="padding-left: {depth * 22}px">
+				{@const route =
+					node.item_type === 'day' || node.item_type === 'section' ? dayDirections(node.id) : null}
+				<li
+					id="itin-{node.id}"
+					style="padding-left: {depth * 22}px"
+					class:flash={selectedPin === node.id}
+				>
 					<div class="line">
 						<span class="badge {node.item_type === 'place' ? 'seen' : 'need'}"
 							>{node.item_type}</span
 						>
 						<span class="grow">
 							<span class="ttl">{node.title}</span>
-							{#if node.external_url}<a
-									class="chip-link"
-									href={node.external_url}
-									target="_blank"
-									rel="noopener">link</a
-								>{/if}
-							{#if node.lat != null && node.lon != null}
-								<a
-									class="chip-link"
-									href="https://www.google.com/maps/search/?api=1&query={node.lat},{node.lon}"
-									target="_blank"
-									rel="noopener">map</a
-								>
-							{/if}
 							{#if node.notes}<div class="meta">{node.notes}</div>{/if}
+							<div class="chips">
+								{#if node.item_type === 'place'}
+									<a
+										class="chip-link"
+										href={googleMapsLink(toPlace(node))}
+										target="_blank"
+										rel="noopener">Google</a
+									>
+									<a
+										class="chip-link"
+										href={appleMapsLink(toPlace(node))}
+										target="_blank"
+										rel="noopener">Apple</a
+									>
+									<a
+										class="chip-link"
+										href={googleDirectionsLink(toPlace(node))}
+										target="_blank"
+										rel="noopener">Directions</a
+									>
+								{/if}
+								{#if route}
+									<a class="chip-link route" href={route} target="_blank" rel="noopener"
+										>Directions for the day</a
+									>
+								{/if}
+								{#if node.external_url}
+									<a class="chip-link" href={node.external_url} target="_blank" rel="noopener"
+										>Reference</a
+									>
+								{/if}
+								{#if !isViewer && node.item_type === 'place'}
+									<a class="chip-link loc" href="/trips/{data.trip.id}/place/{node.id}">
+										{node.lat != null ? '📍 location' : '＋ location'}
+									</a>
+								{/if}
+							</div>
 						</span>
 						{#if !isViewer}{@render treeControls(node.id, 'itin-move', 'itin-delete', null)}{/if}
 					</div>
@@ -307,9 +378,42 @@
 		height: 22px;
 		flex-shrink: 0;
 	}
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-top: 4px;
+	}
 	.chip-link {
 		font-size: 0.78rem;
-		margin-left: 6px;
+		padding: 3px 9px;
+		border-radius: 999px;
+		background: var(--accent-soft);
+		color: var(--accent);
+		text-decoration: none;
+		min-height: 28px;
+		display: inline-flex;
+		align-items: center;
+	}
+	.chip-link.route {
+		background: var(--need-bg);
+		color: var(--need-text);
+	}
+	.chip-link.loc {
+		background: var(--bg);
+		border: 1px solid var(--border);
+		color: var(--muted);
+	}
+	li.flash {
+		animation: flash 1.4s ease-out;
+	}
+	@keyframes flash {
+		from {
+			background: var(--accent-soft);
+		}
+		to {
+			background: transparent;
+		}
 	}
 	.row-controls {
 		display: flex;

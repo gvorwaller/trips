@@ -143,3 +143,36 @@ export async function deleteItem(tripId: number, id: number): Promise<boolean> {
 	]);
 	return (res.rowCount ?? 0) > 0;
 }
+
+/** Set an item's coordinates (from the MapPicker). google_maps_url is optional. */
+export async function setLocation(
+	tripId: number,
+	id: number,
+	lat: number,
+	lon: number,
+	placeId: string | null
+): Promise<boolean> {
+	const res = await query(
+		`UPDATE itinerary_items SET lat = $3, lon = $4, place_id = $5, updated_at = NOW()
+		 WHERE id = $1 AND trip_id = $2`,
+		[id, tripId, lat, lon, placeId]
+	);
+	return (res.rowCount ?? 0) > 0;
+}
+
+export async function clearLocation(tripId: number, id: number): Promise<boolean> {
+	const res = await query(
+		`UPDATE itinerary_items SET lat = NULL, lon = NULL, place_id = NULL, updated_at = NOW()
+		 WHERE id = $1 AND trip_id = $2`,
+		[id, tripId]
+	);
+	return (res.rowCount ?? 0) > 0;
+}
+
+export async function getItem(tripId: number, id: number): Promise<ItineraryItem | null> {
+	const res = await query<ItineraryItem>(
+		`SELECT ${SELECT_COLS} FROM itinerary_items WHERE id = $1 AND trip_id = $2`,
+		[id, tripId]
+	);
+	return res.rows[0] ?? null;
+}
