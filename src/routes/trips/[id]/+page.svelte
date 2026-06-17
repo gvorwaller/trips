@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
+	import { browser } from '$app/environment';
+	import { onMount } from 'svelte';
 	import PinMap from '$components/PinMap.svelte';
 	import {
 		googleMapsLink,
@@ -95,6 +97,99 @@
 		});
 		if (res.ok) invalidateAll();
 	}
+
+	// ── Collapse / expand (client-only, persisted in localStorage) ──────────
+	// CarbonFin-style branch folding. Itinerary and packing items live in
+	// separate tables (ids can collide), so each tree keeps its own collapsed-id
+	// set, namespaced per trip. State is purely client-side: no DB column, no
+	// mutation — so viewers can fold freely without tripping the write guard.
+	const itinKey = $derived(`trips:${data.trip.id}:itinCollapsed`);
+	const packKey = $derived(`trips:${data.trip.id}:packCollapsed`);
+
+	let itinCollapsed = $state<Set<number>>(new Set());
+	let packCollapsed = $state<Set<number>>(new Set());
+
+	onMount(() => {
+		itinCollapsed = loadIds(itinKey);
+		packCollapsed = loadIds(packKey);
+	});
+
+	function loadIds(key: string): Set<number> {
+		if (!browser) return new Set();
+		try {
+			const v = JSON.parse(localStorage.getItem(key) ?? '[]');
+			return new Set(Array.isArray(v) ? v.map(Number).filter(Number.isInteger) : []);
+		} catch {
+			return new Set();
+		}
+	}
+	function saveIds(key: string, ids: Set<number>) {
+		if (browser) localStorage.setItem(key, JSON.stringify([...ids]));
+	}
+
+	type TreeRow = { node: { id: number; parent_id: number | null }; depth: number };
+
+	function childMap(rows: TreeRow[]): Map<number, number[]> {
+		const m = new Map<number, number[]>();
+		for (const { node } of rows) {
+			if (node.parent_id != null) {
+				const arr = m.get(node.parent_id);
+				if (arr) arr.push(node.id);
+				else m.set(node.parent_id, [node.id]);
+			}
+		}
+		return m;
+	}
+	// Ids hidden because some ancestor is collapsed (the collapsed node itself stays visible).
+	function hiddenIds(rows: TreeRow[], collapsed: Set<number>): Set<number> {
+		const kids = childMap(rows);
+		const hidden = new Set<number>();
+		const walk = (id: number) => {
+			for (const c of kids.get(id) ?? []) {
+				if (!hidden.has(c)) {
+					hidden.add(c);
+					walk(c);
+				}
+			}
+		};
+		for (const id of collapsed) if (kids.has(id)) walk(id);
+		return hidden;
+	}
+	// Ids with at least one child (i.e. foldable).
+	function parentIds(rows: TreeRow[]): Set<number> {
+		const s = new Set<number>();
+		for (const { node } of rows) if (node.parent_id != null) s.add(node.parent_id);
+		return s;
+	}
+
+	const itinHidden = $derived(hiddenIds(data.itineraryRows, itinCollapsed));
+	const itinParents = $derived(parentIds(data.itineraryRows));
+
+	function toggled(set: Set<number>, key: string, id: number): Set<number> {
+		const next = new Set(set);
+		if (next.has(id)) next.delete(id);
+		else next.add(id);
+		saveIds(key, next);
+		return next;
+	}
+	const toggleItin = (id: number) => (itinCollapsed = toggled(itinCollapsed, itinKey, id));
+	const togglePack = (id: number) => (packCollapsed = toggled(packCollapsed, packKey, id));
+
+	function bulkFold(set: Set<number>, key: string, ids: Set<number>, collapse: boolean): Set<number> {
+		const next = new Set(set);
+		for (const id of ids) {
+			if (collapse) next.add(id);
+			else next.delete(id);
+		}
+		saveIds(key, next);
+		return next;
+	}
+	const collapseAllItin = () => (itinCollapsed = bulkFold(itinCollapsed, itinKey, itinParents, true));
+	const expandAllItin = () => (itinCollapsed = bulkFold(itinCollapsed, itinKey, itinParents, false));
+	const collapsePack = (rows: TreeRow[]) =>
+		(packCollapsed = bulkFold(packCollapsed, packKey, parentIds(rows), true));
+	const expandPack = (rows: TreeRow[]) =>
+		(packCollapsed = bulkFold(packCollapsed, packKey, parentIds(rows), false));
 </script>
 
 <svelte:head><title>{data.trip.name}</title></svelte:head>
@@ -159,19 +254,40 @@
 	{#if data.itineraryRows.length === 0}
 		<p class="muted">No places yet.</p>
 	{:else}
+		{#if itinParents.size > 0}
+			<div class="tree-tools">
+				<button type="button" class="linkbtn" onclick={collapseAllItin}>Collapse all</button>
+				<span class="sep" aria-hidden="true">·</span>
+				<button type="button" class="linkbtn" onclick={expandAllItin}>Expand all</button>
+			</div>
+		{/if}
 		<ul class="outline">
 			{#each data.itineraryRows as { node, depth } (node.id)}
-				{@const route =
-					node.item_type === 'day' || node.item_type === 'section' ? dayDirections(node.id) : null}
-				<li
-					id="itin-{node.id}"
-					style="padding-left: {depth * 22}px"
-					class:flash={selectedPin === node.id}
-				>
-					<div class="line">
-						<span class="badge {node.item_type === 'place' ? 'seen' : 'need'}"
-							>{node.item_type}</span
-						>
+				{#if !itinHidden.has(node.id)}
+					{@const route =
+						node.item_type === 'day' || node.item_type === 'section'
+							? dayDirections(node.id)
+							: null}
+					<li
+						id="itin-{node.id}"
+						style="padding-left: {depth * 22}px"
+						class:flash={selectedPin === node.id}
+					>
+						<div class="line">
+							{#if itinParents.has(node.id)}
+								<button
+									class="caret"
+									type="button"
+									aria-expanded={!itinCollapsed.has(node.id)}
+									aria-label={itinCollapsed.has(node.id) ? 'Expand' : 'Collapse'}
+									onclick={() => toggleItin(node.id)}>{itinCollapsed.has(node.id) ? '▸' : '▾'}</button
+								>
+							{:else}
+								<span class="caret-spacer" aria-hidden="true"></span>
+							{/if}
+							<span class="badge {node.item_type === 'place' ? 'seen' : 'need'}"
+								>{node.item_type}</span
+							>
 						<span class="grow">
 							<span class="ttl">{node.title}</span>
 							{#if node.notes}<div class="meta">{node.notes}</div>{/if}
@@ -240,6 +356,7 @@
 						</details>
 					{/if}
 				</li>
+				{/if}
 			{/each}
 		</ul>
 	{/if}
@@ -271,10 +388,19 @@
 <div class="card">
 	<h2>Packing</h2>
 	{#each data.packing as { list, rows, total, checked } (list.id)}
+		{@const packHidden = hiddenIds(rows, packCollapsed)}
+		{@const packParents = parentIds(rows)}
 		<section class="plist">
 			<div class="plist-head">
 				<strong>{list.name}</strong>
 				<span class="muted">{checked} / {total} packed</span>
+				{#if packParents.size > 0}
+					<button type="button" class="linkbtn" onclick={() => collapsePack(rows)}
+						>Collapse all</button
+					>
+					<span class="sep" aria-hidden="true">·</span>
+					<button type="button" class="linkbtn" onclick={() => expandPack(rows)}>Expand all</button>
+				{/if}
 				{#if !isViewer}
 					<button
 						class="del"
@@ -299,14 +425,26 @@
 
 			<ul class="outline">
 				{#each rows as { node, depth } (node.id)}
-					<li style="padding-left: {depth * 22}px">
-						<div class="line">
-							<input
-								type="checkbox"
-								class="chk"
-								checked={node.checked}
-								onchange={(e) => toggleCheck(node.id, e.currentTarget.checked)}
-							/>
+					{#if !packHidden.has(node.id)}
+						<li style="padding-left: {depth * 22}px">
+							<div class="line">
+								{#if packParents.has(node.id)}
+									<button
+										class="caret"
+										type="button"
+										aria-expanded={!packCollapsed.has(node.id)}
+										aria-label={packCollapsed.has(node.id) ? 'Expand' : 'Collapse'}
+										onclick={() => togglePack(node.id)}>{packCollapsed.has(node.id) ? '▸' : '▾'}</button
+									>
+								{:else}
+									<span class="caret-spacer" aria-hidden="true"></span>
+								{/if}
+								<input
+									type="checkbox"
+									class="chk"
+									checked={node.checked}
+									onchange={(e) => toggleCheck(node.id, e.currentTarget.checked)}
+								/>
 							<span class="grow" class:done={node.checked}>
 								{node.name}{#if node.quantity > 1}<span class="muted"> ×{node.quantity}</span>{/if}
 							</span>
@@ -320,6 +458,7 @@
 								)}{/if}
 						</div>
 					</li>
+					{/if}
 				{/each}
 			</ul>
 
@@ -604,6 +743,49 @@
 		gap: 8px;
 		min-height: 44px;
 		padding: 4px 0;
+	}
+	/* Collapse/expand caret on foldable rows; spacer keeps leaf rows aligned. */
+	.caret {
+		flex-shrink: 0;
+		width: 24px;
+		height: 24px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		font-size: 0.8rem;
+		line-height: 1;
+		color: var(--muted);
+		background: transparent;
+		border: none;
+		border-radius: 4px;
+		cursor: pointer;
+	}
+	.caret:hover {
+		background: var(--bg);
+		color: var(--text);
+	}
+	.caret-spacer {
+		flex-shrink: 0;
+		width: 24px;
+	}
+	.tree-tools {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 4px 0;
+		font-size: 0.85rem;
+	}
+	.tree-tools .sep {
+		color: var(--muted);
+	}
+	.linkbtn {
+		background: none;
+		border: none;
+		padding: 0;
+		font-size: inherit;
+		color: var(--link);
+		cursor: pointer;
+		text-decoration: underline;
 	}
 	.grow {
 		flex: 1;
