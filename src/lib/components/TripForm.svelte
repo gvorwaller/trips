@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
+	import DatePicker from '$components/DatePicker.svelte';
 
 	interface Values {
 		name?: string;
@@ -32,7 +33,6 @@
 			submitting = false;
 		};
 	}}
-	novalidate
 >
 	<label class="field">
 		<span>Trip name</span>
@@ -43,11 +43,13 @@
 		<div class="row">
 			<label>
 				<span>Start date</span>
-				<input type="date" name="start_date" value={values.start_date ?? ''} />
+				<!-- Calendar-only picker: dates are chosen by tapping a day, never
+				     typed, so a partial/invalid date (the td-d0cac7 bug) is impossible. -->
+				<DatePicker name="start_date" value={values.start_date ?? null} />
 			</label>
 			<label>
 				<span>End date</span>
-				<input type="date" name="end_date" value={values.end_date ?? ''} />
+				<DatePicker name="end_date" value={values.end_date ?? null} />
 			</label>
 		</div>
 	</div>

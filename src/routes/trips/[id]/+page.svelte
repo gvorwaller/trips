@@ -13,8 +13,22 @@
 
 	let { data }: { data: PageData } = $props();
 	const isViewer = $derived(data.user?.role === 'viewer');
-	let confirming = $state(false);
 	let selectedPin = $state<number | null>(null);
+
+	// Single shared confirm-delete modal. Every ✕ / Delete control opens this
+	// instead of submitting immediately, so no deletion (and no parent_id
+	// ON DELETE CASCADE wipe of children) happens without confirmation. (td-02acd0)
+	type PendingDelete = {
+		action: string; // form action name, e.g. 'itin-delete'
+		fields: Record<string, number>; // hidden inputs the action needs
+		heading: string;
+		body: string;
+		confirmLabel: string;
+	};
+	let pendingDelete = $state<PendingDelete | null>(null);
+
+	const itinHasChildren = (id: number) =>
+		data.itineraryRows.some((r) => r.node.parent_id === id);
 
 	type ItinNode = PageData['itineraryRows'][number]['node'];
 	const toPlace = (n: ItinNode): MapPlace => ({
@@ -99,7 +113,14 @@
 {/if}
 
 <!-- reusable owner control cluster for an outliner row -->
-{#snippet treeControls(id: number, moveAction: string, deleteAction: string, listId: number | null)}
+{#snippet treeControls(
+	id: number,
+	moveAction: string,
+	deleteAction: string,
+	listId: number | null,
+	label: string,
+	hasChildren: boolean
+)}
 	<span class="row-controls">
 		{#each [['indent', '⇥'], ['outdent', '⇤'], ['move-up', '↑'], ['move-down', '↓']] as [op, glyph] (op)}
 			<form method="POST" action="?/{moveAction}" use:enhance>
@@ -109,11 +130,21 @@
 				<button type="submit" title={op}>{glyph}</button>
 			</form>
 		{/each}
-		<form method="POST" action="?/{deleteAction}" use:enhance>
-			<input type="hidden" name="id" value={id} />
-			{#if listId !== null}<input type="hidden" name="list_id" value={listId} />{/if}
-			<button type="submit" class="del" title="delete">✕</button>
-		</form>
+		<button
+			type="button"
+			class="del"
+			title="delete"
+			onclick={() =>
+				(pendingDelete = {
+					action: deleteAction,
+					fields: listId !== null ? { id, list_id: listId } : { id },
+					heading: 'Delete this item?',
+					body: hasChildren
+						? `“${label}” and everything nested under it will be permanently removed.`
+						: `“${label}” will be permanently removed.`,
+					confirmLabel: 'Delete'
+				})}>✕</button
+		>
 	</span>
 {/snippet}
 
@@ -182,7 +213,14 @@
 								{/if}
 							</div>
 						</span>
-						{#if !isViewer}{@render treeControls(node.id, 'itin-move', 'itin-delete', null)}{/if}
+						{#if !isViewer}{@render treeControls(
+								node.id,
+								'itin-move',
+								'itin-delete',
+								null,
+								node.title,
+								itinHasChildren(node.id)
+							)}{/if}
 					</div>
 					{#if !isViewer}
 						<details class="edit">
@@ -238,10 +276,19 @@
 				<strong>{list.name}</strong>
 				<span class="muted">{checked} / {total} packed</span>
 				{#if !isViewer}
-					<form method="POST" action="?/list-delete" use:enhance class="inline">
-						<input type="hidden" name="list_id" value={list.id} />
-						<button class="del" type="submit" title="delete list">✕ list</button>
-					</form>
+					<button
+						class="del"
+						type="button"
+						title="delete list"
+						onclick={() =>
+							(pendingDelete = {
+								action: 'list-delete',
+								fields: { list_id: list.id },
+								heading: 'Delete this packing list?',
+								body: `“${list.name}” and all ${total} item${total === 1 ? '' : 's'} in it will be permanently removed.`,
+								confirmLabel: 'Delete list'
+							})}>✕ list</button
+					>
 				{/if}
 			</div>
 			{#if total > 0}
@@ -267,7 +314,9 @@
 									node.id,
 									'pack-move',
 									'pack-delete',
-									list.id
+									list.id,
+									node.name,
+									rows.some((r) => r.node.parent_id === node.id)
 								)}{/if}
 						</div>
 					</li>
@@ -354,10 +403,19 @@
 							{#if r.notes}<div class="meta">{r.notes}</div>{/if}
 						</span>
 						{#if !isViewer}
-							<form method="POST" action="?/res-delete" use:enhance>
-								<input type="hidden" name="id" value={r.id} />
-								<button type="submit" class="del" title="delete">✕</button>
-							</form>
+							<button
+								type="button"
+								class="del"
+								title="delete"
+								onclick={() =>
+									(pendingDelete = {
+										action: 'res-delete',
+										fields: { id: r.id },
+										heading: 'Delete this reservation?',
+										body: `“${r.title}” will be permanently removed.`,
+										confirmLabel: 'Delete'
+									})}>✕</button
+							>
 						{/if}
 					</div>
 					{#if !isViewer}
@@ -437,10 +495,19 @@
 							<div class="meta">{a.mime_type} · {fmtSize(a.size_bytes)}</div>
 						</span>
 						{#if !isViewer}
-							<form method="POST" action="?/attach-delete" use:enhance>
-								<input type="hidden" name="id" value={a.id} />
-								<button type="submit" class="del" title="delete">✕</button>
-							</form>
+							<button
+								type="button"
+								class="del"
+								title="delete"
+								onclick={() =>
+									(pendingDelete = {
+										action: 'attach-delete',
+										fields: { id: a.id },
+										heading: 'Delete this document?',
+										body: `“${a.original_name}” will be permanently removed from storage.`,
+										confirmLabel: 'Delete'
+									})}>✕</button
+							>
 						{/if}
 					</div>
 				</li>
@@ -470,22 +537,53 @@
 		<form method="POST" action="?/duplicate" use:enhance class="inline">
 			<button class="btn" type="submit">Duplicate</button>
 		</form>
-		<button class="btn danger" type="button" onclick={() => (confirming = true)}>Delete</button>
+		<button
+			class="btn danger"
+			type="button"
+			onclick={() =>
+				(pendingDelete = {
+					action: 'delete',
+					fields: {},
+					heading: 'Delete this trip?',
+					body: `“${data.trip.name}” and everything in it will be permanently removed.`,
+					confirmLabel: 'Delete trip'
+				})}>Delete</button
+		>
 	</div>
 
-	<div class="modal-overlay" class:open={confirming}>
-		<div class="modal" role="dialog" aria-modal="true" aria-labelledby="del-title">
-			<h3 id="del-title">Delete this trip?</h3>
-			<p>“{data.trip.name}” and everything in it will be permanently removed.</p>
-			<div class="actions">
-				<button class="btn" type="button" onclick={() => (confirming = false)}>Cancel</button>
-				<form method="POST" action="?/delete" use:enhance>
-					<button class="btn danger" type="submit">Delete trip</button>
-				</form>
+	<div class="modal-overlay" class:open={pendingDelete !== null}>
+		{#if pendingDelete}
+			<div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-del-title">
+				<h3 id="confirm-del-title">{pendingDelete.heading}</h3>
+				<p>{pendingDelete.body}</p>
+				<div class="actions">
+					<button class="btn" type="button" onclick={() => (pendingDelete = null)}>Cancel</button>
+					<form
+						method="POST"
+						action="?/{pendingDelete.action}"
+						use:enhance={() => {
+							return async ({ update }) => {
+								await update();
+								pendingDelete = null;
+							};
+						}}
+					>
+						{#each Object.entries(pendingDelete.fields) as [k, v] (k)}
+							<input type="hidden" name={k} value={v} />
+						{/each}
+						<button class="btn danger" type="submit">{pendingDelete.confirmLabel}</button>
+					</form>
+				</div>
 			</div>
-		</div>
+		{/if}
 	</div>
 {/if}
+
+<svelte:window
+	onkeydown={(e) => {
+		if (e.key === 'Escape') pendingDelete = null;
+	}}
+/>
 
 <style>
 	.back {
