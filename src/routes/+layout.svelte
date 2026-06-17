@@ -8,7 +8,21 @@
 	function active(prefix: string): boolean {
 		return prefix === '/' ? path === '/' : path.startsWith(prefix);
 	}
+
+	// Top-nav hamburger: an everywhere-available menu that also holds the Help
+	// link (which lives ONLY here). Closes on outside-click, Escape, or navigation.
+	let menuOpen = $state(false);
+	let menuRoot = $state<HTMLDivElement | null>(null);
+	const closeMenu = () => (menuOpen = false);
+	function onWindowClick(e: MouseEvent) {
+		if (menuOpen && menuRoot && !menuRoot.contains(e.target as Node)) menuOpen = false;
+	}
+	function onWindowKey(e: KeyboardEvent) {
+		if (menuOpen && e.key === 'Escape') menuOpen = false;
+	}
 </script>
+
+<svelte:window onclick={onWindowClick} onkeydown={onWindowKey} />
 
 {#if data.user}
 	<header class="top-nav">
@@ -27,6 +41,35 @@
 		<form class="logout" method="POST" action="/login?/logout">
 			<button class="signout" type="submit">Sign out</button>
 		</form>
+
+		<div class="menu" bind:this={menuRoot}>
+			<button
+				class="menu-btn"
+				type="button"
+				aria-haspopup="true"
+				aria-expanded={menuOpen}
+				aria-label="Menu"
+				onclick={() => (menuOpen = !menuOpen)}>☰</button
+			>
+			{#if menuOpen}
+				<div class="menu-panel" role="menu">
+					<a href="/" role="menuitem" class:active={active('/')} onclick={closeMenu}>Trips</a>
+					<a href="/search" role="menuitem" class:active={active('/search')} onclick={closeMenu}
+						>Search</a
+					>
+					{#if !isViewer}
+						<a href="/settings" role="menuitem" class:active={active('/settings')} onclick={closeMenu}
+							>Settings</a
+						>
+					{/if}
+					<a href="/help" role="menuitem" class:active={active('/help')} onclick={closeMenu}>Help</a>
+					<div class="menu-sep"></div>
+					<form method="POST" action="/login?/logout">
+						<button type="submit" role="menuitem" class="menu-signout">Sign out</button>
+					</form>
+				</div>
+			{/if}
+		</div>
 	</header>
 
 	{#if isViewer}

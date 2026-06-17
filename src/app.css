@@ -121,6 +121,72 @@ select {
 	font-size: 0.83rem;
 }
 
+/* ── Top-nav hamburger menu (all sizes; holds Help) ── */
+.top-nav .menu {
+	position: relative;
+	margin-left: 4px;
+}
+.menu-btn {
+	min-width: 44px;
+	min-height: 44px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 1.3rem;
+	line-height: 1;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 6px;
+	color: var(--text);
+	cursor: pointer;
+}
+.menu-btn:hover {
+	background: var(--bg);
+}
+.menu-panel {
+	position: absolute;
+	top: calc(100% + 6px);
+	right: 0;
+	min-width: 190px;
+	background: var(--card);
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	box-shadow: 0 6px 24px rgba(33, 37, 41, 0.18);
+	padding: 6px;
+	display: flex;
+	flex-direction: column;
+	z-index: 1100;
+}
+.menu-panel a,
+.menu-signout {
+	display: block;
+	width: 100%;
+	text-align: left;
+	padding: 12px 14px;
+	min-height: 44px;
+	font-size: 0.95rem;
+	font-weight: 600;
+	color: var(--text);
+	text-decoration: none;
+	background: transparent;
+	border: none;
+	border-radius: 6px;
+	cursor: pointer;
+}
+.menu-panel a:hover,
+.menu-signout:hover {
+	background: var(--bg);
+}
+.menu-panel a.active {
+	color: var(--accent);
+	background: var(--accent-soft);
+}
+.menu-sep {
+	height: 1px;
+	background: var(--border);
+	margin: 6px 4px;
+}
+
 /* ── Bottom nav (phone only) — giftlist BottomNav pattern ── */
 .bottom-nav {
 	position: fixed;

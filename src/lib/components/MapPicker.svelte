@@ -29,6 +29,18 @@
 	let markerLib: any = null;
 	/* eslint-enable @typescript-eslint/no-explicit-any */
 
+	// LatLngBounds extending ~`km` kilometres N/S/E/W of a point. Longitude
+	// degrees shrink with latitude (× cos lat), so the box stays ~square on the
+	// ground regardless of how far north/south the place is.
+	function boundsAround(lat: number, lng: number, km: number) {
+		const dLat = km / 111.32;
+		const dLng = km / (111.32 * Math.cos((lat * Math.PI) / 180));
+		return new gmaps.LatLngBounds(
+			{ lat: lat - dLat, lng: lng - dLng },
+			{ lat: lat + dLat, lng: lng + dLng }
+		);
+	}
+
 	async function reverseGeocode(lat: number, lng: number): Promise<string> {
 		try {
 			const res = await fetch('/api/geocode', {
@@ -132,6 +144,10 @@
 
 			if (hasInitial) {
 				placeMarker(initialLat as number, initialLng as number, 'Saved location');
+				// Show the place in context: ~20km of buffer on every side, computed
+				// as distance (not a fixed zoom) so it's consistent across latitudes
+				// and screen sizes. (td-16afd1)
+				map.fitBounds(boundsAround(initialLat as number, initialLng as number, 20));
 			}
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Could not load the map.';
