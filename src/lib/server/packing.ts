@@ -199,9 +199,13 @@ export async function deletePackingItem(listId: number, id: number): Promise<boo
 }
 
 /**
- * Toggle ONLY the checked state, with ownership enforced in one statement.
- * This is the single mutation a read-only viewer is permitted (so a couple can
- * pack together). owner_id scoping means a viewer touches only the owner's data.
+ * Toggle a packing item's checked state AND cascade it to every nested
+ * descendant (td-54f560): checking a category checks everything under it,
+ * unchecking it clears them. One atomic statement — ownership is enforced at
+ * the subtree root via the trips.owner_id join, and descendants inherit it
+ * (same list → same trip → same owner). This is the single mutation a read-only
+ * viewer is permitted (so a couple can pack together), and the cascade rides
+ * that same endpoint. Returns false (→ 404) if the root isn't the owner's.
  */
 export async function setPackingItemChecked(
 	ownerId: number,
@@ -209,11 +213,23 @@ export async function setPackingItemChecked(
 	checked: boolean
 ): Promise<boolean> {
 	const res = await query(
-		`UPDATE packing_items pi
+		`WITH RECURSIVE root AS (
+		     SELECT pi.id, pi.list_id
+		       FROM packing_items pi
+		       JOIN packing_lists pl ON pl.id = pi.list_id
+		       JOIN trips t ON t.id = pl.trip_id
+		      WHERE pi.id = $1 AND t.owner_id = $2
+		 ),
+		 subtree AS (
+		     SELECT id, list_id FROM root
+		     UNION ALL
+		     SELECT c.id, c.list_id
+		       FROM packing_items c
+		       JOIN subtree s ON c.parent_id = s.id AND c.list_id = s.list_id
+		 )
+		 UPDATE packing_items
 		    SET checked = $3, updated_at = NOW()
-		   FROM packing_lists pl
-		   JOIN trips t ON t.id = pl.trip_id
-		  WHERE pi.id = $1 AND pi.list_id = pl.id AND t.owner_id = $2`,
+		  WHERE id IN (SELECT id FROM subtree)`,
 		[itemId, ownerId, checked]
 	);
 	return (res.rowCount ?? 0) > 0;
