@@ -162,6 +162,46 @@
 		return s;
 	}
 
+	// Per-row roll-up of descendant LEAF checked-state (td-b60112). For each node
+	// returns {leaves, checked}: a leaf counts as itself; a parent sums its
+	// descendants. A checkbox is then derived — all leaves checked → checked,
+	// some → indeterminate, none → unchecked — with no extra writes (so the
+	// viewer's single-write constraint holds). The same formula collapses to a
+	// leaf's own state, and a packing list's progress = its roots' totals.
+	type PackRow = { node: { id: number; parent_id: number | null; checked: boolean }; depth: number };
+	function leafStats(rows: PackRow[]): Map<number, { leaves: number; checked: number }> {
+		const kids = childMap(rows);
+		const byId = new Map(rows.map((r) => [r.node.id, r.node]));
+		const memo = new Map<number, { leaves: number; checked: number }>();
+		function stats(id: number): { leaves: number; checked: number } {
+			const hit = memo.get(id);
+			if (hit) return hit;
+			const childIds = kids.get(id) ?? [];
+			let res: { leaves: number; checked: number };
+			if (childIds.length === 0) {
+				res = { leaves: 1, checked: byId.get(id)?.checked ? 1 : 0 };
+			} else {
+				let leaves = 0;
+				let checked = 0;
+				for (const c of childIds) {
+					const s = stats(c);
+					leaves += s.leaves;
+					checked += s.checked;
+				}
+				res = { leaves, checked };
+			}
+			memo.set(id, res);
+			return res;
+		}
+		const out = new Map<number, { leaves: number; checked: number }>();
+		for (const { node } of rows) out.set(node.id, stats(node.id));
+		return out;
+	}
+	const packChecked = (s?: { leaves: number; checked: number }) =>
+		!!s && s.leaves > 0 && s.checked === s.leaves;
+	const packIndeterminate = (s?: { leaves: number; checked: number }) =>
+		!!s && s.checked > 0 && s.checked < s.leaves;
+
 	const itinHidden = $derived(hiddenIds(data.itineraryRows, itinCollapsed));
 	const itinParents = $derived(parentIds(data.itineraryRows));
 
@@ -390,6 +430,7 @@
 	{#each data.packing as { list, rows, total, checked } (list.id)}
 		{@const packHidden = hiddenIds(rows, packCollapsed)}
 		{@const packParents = parentIds(rows)}
+		{@const packStats = leafStats(rows)}
 		<section class="plist">
 			<div class="plist-head">
 				<strong>{list.name}</strong>
@@ -442,10 +483,11 @@
 								<input
 									type="checkbox"
 									class="chk"
-									checked={node.checked}
+									checked={packChecked(packStats.get(node.id))}
+									indeterminate={packIndeterminate(packStats.get(node.id))}
 									onchange={(e) => toggleCheck(node.id, e.currentTarget.checked)}
 								/>
-							<span class="grow" class:done={node.checked}>
+							<span class="grow" class:done={packChecked(packStats.get(node.id))}>
 								{node.name}{#if node.quantity > 1}<span class="muted"> ×{node.quantity}</span>{/if}
 							</span>
 							{#if !isViewer}{@render treeControls(

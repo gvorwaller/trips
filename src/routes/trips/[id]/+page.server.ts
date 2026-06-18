@@ -84,8 +84,13 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	const itineraryRows = flattenTree(itinerary);
 	const packing = lists.map((list) => {
 		const items = itemsByList.get(list.id) ?? [];
-		const checked = items.filter((i) => i.checked).length;
-		return { list, rows: flattenTree(items), total: items.length, checked };
+		// Progress counts actual items (leaves), not category headers — a parent's
+		// checkbox is derived from its descendants client-side (td-b60112), so
+		// counting parents too would double-count and disagree with that display.
+		const parentOf = new Set(items.filter((i) => i.parent_id != null).map((i) => i.parent_id));
+		const leaves = items.filter((i) => !parentOf.has(i.id));
+		const checked = leaves.filter((i) => i.checked).length;
+		return { list, rows: flattenTree(items), total: leaves.length, checked };
 	});
 	return { trip, itineraryRows, packing, templates, reservations, attachments };
 };
