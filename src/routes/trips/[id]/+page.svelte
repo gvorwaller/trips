@@ -2,7 +2,7 @@
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
 	import { browser } from '$app/environment';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import PinMap from '$components/PinMap.svelte';
 	import {
 		googleMapsLink,
@@ -330,6 +330,20 @@
 		(packCollapsed = bulkFold(packCollapsed, packKey, parentIds(rows), true));
 	const expandPack = (rows: TreeRow[]) =>
 		(packCollapsed = bulkFold(packCollapsed, packKey, parentIds(rows), false));
+
+	// Print a one-page trip sheet (td-a2d073). Collapsed branches are removed from
+	// the DOM, so expand everything first (in memory only — don't persist to
+	// localStorage), render, print, then restore the user's fold state.
+	async function printSheet() {
+		const savedItin = itinCollapsed;
+		const savedPack = packCollapsed;
+		itinCollapsed = new Set();
+		packCollapsed = new Set();
+		await tick();
+		window.print();
+		itinCollapsed = savedItin;
+		packCollapsed = savedPack;
+	}
 </script>
 
 <svelte:head><title>{data.trip.name}</title></svelte:head>
@@ -338,6 +352,7 @@
 	<a class="muted back" href="/">← All trips</a>
 	<h1>{data.trip.name}</h1>
 	<div class="sub">{fmtRange(data.trip.start_date, data.trip.end_date)}</div>
+	<button type="button" class="btn small print-btn" onclick={printSheet}>🖨 Print</button>
 </div>
 
 {#if data.trip.notes}

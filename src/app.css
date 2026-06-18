@@ -673,3 +673,90 @@ select {
 	gap: 8px;
 	flex-wrap: wrap;
 }
+
+/* ── Print: one-page trip sheet (td-a2d073) ─────────────────────────────────
+   Strip interactive chrome (nav, forms, row controls, map, modals) and lay the
+   trip out as a clean document. A Print button expands all branches first. */
+@media print {
+	.top-nav,
+	.bottom-nav,
+	.readonly-banner,
+	.menu,
+	.back,
+	.print-btn,
+	.form-actions,
+	.row-controls,
+	.insert-controls,
+	.drag-handle,
+	.caret,
+	.caret-spacer,
+	.tree-tools,
+	.insert-row,
+	.progress,
+	.del,
+	.linkbtn,
+	.plist-head .sep,
+	.chips,
+	.add-row,
+	.paste,
+	.extract,
+	.templates,
+	.edit,
+	.map,
+	.modal-overlay,
+	.logout {
+		display: none !important;
+	}
+
+	:root {
+		--bg: #fff;
+		--card: #fff;
+	}
+	html,
+	body {
+		background: #fff;
+		-webkit-print-color-adjust: exact;
+		print-color-adjust: exact;
+	}
+	.page {
+		max-width: none;
+		margin: 0;
+		padding: 0;
+	}
+	.card {
+		border: none;
+		box-shadow: none;
+		padding: 0 0 6px;
+		margin: 0 0 10px;
+		break-inside: avoid;
+	}
+	h1 {
+		font-size: 20pt;
+		margin: 0 0 2pt;
+	}
+	h2 {
+		font-size: 13pt;
+		border-bottom: 1px solid #999;
+		padding-bottom: 2pt;
+		margin: 8pt 0 4pt;
+		break-after: avoid;
+	}
+	.page-head .sub {
+		font-size: 11pt;
+	}
+	a {
+		color: #000;
+		text-decoration: none;
+	}
+	li,
+	.obs {
+		break-inside: avoid;
+	}
+	/* Show pasted-text documents in full even if their <details> is collapsed. */
+	.textdoc-body {
+		display: block !important;
+	}
+	@page {
+		margin: 14mm;
+	}
+}
