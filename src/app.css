@@ -715,6 +715,10 @@ select {
 	html,
 	body {
 		background: #fff;
+		/* Screen base is 18px/1.5 — far too large/airy on paper. Shrink to a
+		   compact print scale so more fits per page. */
+		font-size: 9.5pt;
+		line-height: 1.25;
 		-webkit-print-color-adjust: exact;
 		print-color-adjust: exact;
 	}
@@ -726,23 +730,44 @@ select {
 	.card {
 		border: none;
 		box-shadow: none;
-		padding: 0 0 6px;
-		margin: 0 0 10px;
+		padding: 0 0 3px;
+		margin: 0 0 6px;
 		break-inside: avoid;
 	}
 	h1 {
-		font-size: 20pt;
-		margin: 0 0 2pt;
+		font-size: 16pt;
+		margin: 0 0 1pt;
 	}
 	h2 {
-		font-size: 13pt;
+		font-size: 11pt;
 		border-bottom: 1px solid #999;
-		padding-bottom: 2pt;
-		margin: 8pt 0 4pt;
+		padding-bottom: 1pt;
+		margin: 6pt 0 2pt;
 		break-after: avoid;
 	}
 	.page-head .sub {
-		font-size: 11pt;
+		font-size: 9.5pt;
+	}
+	/* Collapse the 44px touch tap-target row height and trim row padding so
+	   list items sit on tight single lines (overrides component-scoped styles,
+	   hence !important). */
+	.line {
+		min-height: 0 !important;
+		padding: 0.5pt 0 !important;
+		gap: 5px !important;
+	}
+	.obs {
+		padding: 2.5pt 0 !important;
+		gap: 8px;
+	}
+	.meta,
+	.obs .meta {
+		font-size: 8pt !important;
+		margin-top: 0 !important;
+	}
+	.chk {
+		width: 11px !important;
+		height: 11px !important;
 	}
 	a {
 		color: #000;
@@ -757,6 +782,6 @@ select {
 		display: block !important;
 	}
 	@page {
-		margin: 14mm;
+		margin: 12mm;
 	}
 }
