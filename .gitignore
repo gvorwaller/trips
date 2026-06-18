@@ -6,6 +6,8 @@ node_modules/
 .env.*
 !.env.example
 .DS_Store
+# DB snapshots + droplet config pulled by scripts/backup-pg.sh (contains secrets)
+data/
 /.local
 /.todos
 vite.config.ts.timestamp-*
