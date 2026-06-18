@@ -29,6 +29,48 @@
 		node.focus();
 	}
 
+	// Drag-to-reorder packing items (td-4f7d9b). Desktop polish on top of the
+	// insert/move buttons (which remain the primary, touch-friendly path). Dropping
+	// a row before/after a target makes it a sibling of that target at that spot;
+	// re-nesting deeper still uses the indent/outdent buttons. Server rejects
+	// cross-list / cycles. dragListId scopes a drag to its own list.
+	let dragId = $state<number | null>(null);
+	let dragListId = $state<number | null>(null);
+	let dropTarget = $state<{ id: number; pos: 'before' | 'after' } | null>(null);
+
+	function onRowDragOver(e: DragEvent, listId: number, targetId: number) {
+		if (dragId === null || dragListId !== listId || dragId === targetId) return;
+		e.preventDefault(); // allow drop
+		const el = e.currentTarget as HTMLElement;
+		const r = el.getBoundingClientRect();
+		dropTarget = { id: targetId, pos: e.clientY - r.top < r.height / 2 ? 'before' : 'after' };
+	}
+
+	async function onRowDrop(listId: number, rows: TreeRow[]) {
+		const drop = dropTarget;
+		const dragged = dragId;
+		dropTarget = null;
+		dragId = null;
+		dragListId = null;
+		if (drop === null || dragged === null || drop.id === dragged) return;
+		const target = rows.find((r) => r.node.id === drop.id);
+		if (!target) return;
+		const parentId = target.node.parent_id;
+		// Sibling order under parentId, excluding the dragged node (matches computeReparent).
+		const sibs = rows
+			.filter((r) => r.node.parent_id === parentId && r.node.id !== dragged)
+			.map((r) => r.node.id);
+		let index = sibs.indexOf(drop.id);
+		if (drop.pos === 'after') index += 1;
+		const fd = new FormData();
+		fd.set('list_id', String(listId));
+		fd.set('id', String(dragged));
+		fd.set('parent_id', parentId === null ? '' : String(parentId));
+		fd.set('index', String(index));
+		const res = await fetch('?/pack-reparent', { method: 'POST', body: fd });
+		if (res.ok) invalidateAll();
+	}
+
 	// Add-reservation draft, bound to the form so LLM extraction (td-3a0e29) can
 	// pre-fill it for review. Extraction never saves — the human edits then Adds.
 	type ResDraft = {
@@ -556,8 +598,33 @@
 								'above',
 								depth
 							)}{/if}
-						<li style="padding-left: {depth * 22}px">
+						<li
+							style="padding-left: {depth * 22}px"
+							class:drop-before={dropTarget?.id === node.id && dropTarget?.pos === 'before'}
+							class:drop-after={dropTarget?.id === node.id && dropTarget?.pos === 'after'}
+							ondragover={(e) => onRowDragOver(e, list.id, node.id)}
+							ondrop={() => onRowDrop(list.id, rows)}
+						>
 							<div class="line">
+								{#if !isViewer}
+									<span
+										class="drag-handle"
+										title="drag to reorder"
+										draggable="true"
+										ondragstart={() => {
+											dragId = node.id;
+											dragListId = list.id;
+										}}
+										ondragend={() => {
+											dragId = null;
+											dragListId = null;
+											dropTarget = null;
+										}}
+										role="button"
+										tabindex="-1"
+										aria-label="drag to reorder">⠿</span
+									>
+								{/if}
 								{#if packParents.has(node.id)}
 									<button
 										class="caret"
@@ -578,6 +645,7 @@
 								/>
 							<span class="grow" class:done={packChecked(packStats.get(node.id))}>
 								{node.name}{#if node.quantity > 1}<span class="muted"> ×{node.quantity}</span>{/if}
+								{#if node.notes}<div class="meta note">{node.notes}</div>{/if}
 							</span>
 							{#if !isViewer}
 								<span class="insert-controls">
@@ -597,6 +665,20 @@
 									rows.some((r) => r.node.parent_id === node.id)
 								)}{/if}
 						</div>
+						{#if !isViewer}
+							<details class="edit" style="padding-left: {depth * 22 + 26}px">
+								<summary>edit</summary>
+								<form method="POST" action="?/pack-edit" use:enhance class="edit-form">
+									<input type="hidden" name="id" value={node.id} />
+									<input type="hidden" name="list_id" value={list.id} />
+									<input type="hidden" name="category" value={node.category ?? ''} />
+									<input name="name" value={node.name} placeholder="Name" required />
+									<input name="quantity" type="number" min="1" value={node.quantity} class="qty" aria-label="quantity" />
+									<textarea name="notes" rows="2" placeholder="Notes">{node.notes ?? ''}</textarea>
+									<button class="btn small primary" type="submit">Save</button>
+								</form>
+							</details>
+						{/if}
 					</li>
 					{#if !isViewer && isInserting(node.id, 'below')}{@render packInsertForm(
 							list.id,
@@ -1162,6 +1244,23 @@
 	}
 	.insert-row {
 		margin: 2px 0;
+	}
+	.drag-handle {
+		cursor: grab;
+		color: var(--muted);
+		user-select: none;
+		padding: 0 4px;
+		flex-shrink: 0;
+		touch-action: none;
+	}
+	.drag-handle:active {
+		cursor: grabbing;
+	}
+	li.drop-before {
+		box-shadow: inset 0 2px 0 0 var(--link);
+	}
+	li.drop-after {
+		box-shadow: inset 0 -2px 0 0 var(--link);
 	}
 	.textdoc summary {
 		cursor: pointer;

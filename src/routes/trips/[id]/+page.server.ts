@@ -31,7 +31,7 @@ import {
 	deleteTemplate
 } from '$server/templates';
 import { duplicateTrip } from '$server/clone';
-import { runTreeOp, type TreeOp } from '$server/tree-sql';
+import { runTreeOp, runReparent, type TreeOp } from '$server/tree-sql';
 import { flattenTree } from '$server/tree';
 import {
 	listReservations,
@@ -286,6 +286,27 @@ export const actions: Actions = {
 		await assertListInTrip(tripId, listId);
 		await runTreeOp('packing_items', listId, parseId(form.get('id')), asOp(form.get('op')));
 		return { ok: true };
+	},
+
+	// Drag-and-drop reorder/reparent within a packing list (td-4f7d9b). Rejects
+	// cross-list, cycles, and unknown parents in runReparent/computeReparent.
+	'pack-reparent': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const listId = parseId(form.get('list_id'));
+		await assertListInTrip(tripId, listId);
+		const rawParent = form.get('parent_id');
+		const parentId = rawParent === null || rawParent === '' ? null : parseId(rawParent);
+		const index = Number(form.get('index'));
+		const ok = await runReparent(
+			'packing_items',
+			listId,
+			parseId(form.get('id')),
+			parentId,
+			Number.isInteger(index) && index >= 0 ? index : 0
+		);
+		return { ok };
 	},
 
 	// ── Templates ──────────────────────────────────────────
