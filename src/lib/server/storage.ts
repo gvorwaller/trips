@@ -67,3 +67,13 @@ export async function getObject(key: string): Promise<FetchedObject> {
 export async function deleteObject(key: string): Promise<void> {
 	await getClient().send(new DeleteObjectCommand({ Bucket: BUCKET(), Key: key }));
 }
+
+/** Fetch an object fully into memory (for LLM vision input, not streaming). */
+export async function getObjectBuffer(key: string): Promise<Buffer> {
+	const obj = await getObject(key);
+	const chunks: Buffer[] = [];
+	for await (const chunk of obj.body) {
+		chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+	}
+	return Buffer.concat(chunks);
+}

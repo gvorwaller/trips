@@ -40,6 +40,7 @@ import {
 	deleteReservation,
 	parseReservationForm
 } from '$server/reservations';
+import { extractFromText, extractFromDocument } from '$server/reservation-extract';
 import {
 	listAttachmentsForTrip,
 	uploadAttachment,
@@ -322,6 +323,28 @@ export const actions: Actions = {
 	},
 
 	// ── Reservations ───────────────────────────────────────
+	// Pre-fill the form from a pasted email or an uploaded document (td-3a0e29).
+	// Returns candidate fields only — never creates the reservation.
+	'res-extract': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const fields =
+			form.get('source') === 'document'
+				? await extractFromDocument(ownerId, parseId(form.get('attachment_id')))
+				: await (async () => {
+						const text = (form.get('text') ?? '').toString();
+						if (!text.trim()) return null;
+						return extractFromText(text);
+					})();
+		if (!fields) {
+			return fail(502, {
+				error: 'Could not extract details. Check the source or fill the form in manually.'
+			});
+		}
+		return { ok: true, fields };
+	},
+
 	'res-add': async ({ params, request, locals }) => {
 		const { ownerId, tripId } = ctx(locals, params);
 		await ownTrip(ownerId, tripId);

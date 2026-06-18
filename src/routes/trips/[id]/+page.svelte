@@ -29,6 +29,52 @@
 		node.focus();
 	}
 
+	// Add-reservation draft, bound to the form so LLM extraction (td-3a0e29) can
+	// pre-fill it for review. Extraction never saves — the human edits then Adds.
+	type ResDraft = {
+		reservation_type: string;
+		title: string;
+		confirmation_code: string;
+		status: string;
+		start_at: string;
+		end_at: string;
+		notes: string;
+	};
+	const emptyResDraft = (): ResDraft => ({
+		reservation_type: 'other',
+		title: '',
+		confirmation_code: '',
+		status: '',
+		start_at: '',
+		end_at: '',
+		notes: ''
+	});
+	let resDraft = $state<ResDraft>(emptyResDraft());
+	let extractText = $state('');
+	let extractDocId = $state('');
+	let extracting = $state(false);
+	let extractMsg = $state('');
+	// Documents usable as an extraction source (text docs + readable file types).
+	const extractableDocs = $derived(
+		data.attachments.filter(
+			(a) =>
+				a.kind === 'text' ||
+				/^(application\/pdf|image\/(jpeg|png|webp|gif|heic|heif))$/.test(a.mime_type)
+		)
+	);
+	function applyExtract(f: Record<string, unknown>) {
+		const s = (v: unknown): string => (typeof v === 'string' ? v : '');
+		resDraft = {
+			reservation_type: s(f.reservation_type) || 'other',
+			title: s(f.title),
+			confirmation_code: s(f.confirmation_code),
+			status: s(f.status),
+			start_at: s(f.start_at),
+			end_at: s(f.end_at),
+			notes: s(f.notes)
+		};
+	}
+
 	// Single shared confirm-delete modal. Every ✕ / Delete control opens this
 	// instead of submitting immediately, so no deletion (and no parent_id
 	// ON DELETE CASCADE wipe of children) happens without confirmation. (td-02acd0)
@@ -714,17 +760,117 @@
 	{#if !isViewer}
 		<details class="paste">
 			<summary>Add reservation</summary>
-			<form method="POST" action="?/res-add" use:enhance class="edit-form">
-				<select name="reservation_type" aria-label="type">
+
+			<div class="extract">
+				<p class="extract-head">Auto-fill from a confirmation (then review below)</p>
+				<form
+					method="POST"
+					action="?/res-extract"
+					class="extract-form"
+					use:enhance={() => {
+						extracting = true;
+						extractMsg = '';
+						return async ({ result }) => {
+							extracting = false;
+							if (result.type === 'success' && result.data?.ok) {
+								applyExtract((result.data as { fields?: Record<string, unknown> }).fields ?? {});
+								extractMsg = 'Filled from the email — review and edit, then Add reservation.';
+							} else if (result.type === 'failure') {
+								extractMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
+							} else {
+								extractMsg = 'Extraction failed.';
+							}
+						};
+					}}
+				>
+					<input type="hidden" name="source" value="text" />
+					<textarea
+						name="text"
+						rows="3"
+						bind:value={extractText}
+						placeholder="Paste a confirmation email here…"
+					></textarea>
+					<button class="btn small" type="submit" disabled={extracting || !extractText.trim()}>
+						{extracting ? 'Extracting…' : 'Extract from text'}
+					</button>
+				</form>
+
+				{#if extractableDocs.length > 0}
+					<form
+						method="POST"
+						action="?/res-extract"
+						class="extract-form"
+						use:enhance={() => {
+							extracting = true;
+							extractMsg = '';
+							return async ({ result }) => {
+								extracting = false;
+								if (result.type === 'success' && result.data?.ok) {
+									applyExtract((result.data as { fields?: Record<string, unknown> }).fields ?? {});
+									extractMsg = 'Filled from the document — review and edit, then Add reservation.';
+								} else if (result.type === 'failure') {
+									extractMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
+								} else {
+									extractMsg = 'Extraction failed.';
+								}
+							};
+						}}
+					>
+						<input type="hidden" name="source" value="document" />
+						<select name="attachment_id" bind:value={extractDocId} aria-label="document">
+							<option value="" disabled>Choose a document…</option>
+							{#each extractableDocs as a (a.id)}
+								<option value={a.id}>{a.original_name}</option>
+							{/each}
+						</select>
+						<button class="btn small" type="submit" disabled={extracting || !extractDocId}>
+							{extracting ? 'Extracting…' : 'Extract from document'}
+						</button>
+					</form>
+				{/if}
+				{#if extractMsg}<p class="extract-msg">{extractMsg}</p>{/if}
+			</div>
+
+			<form
+				method="POST"
+				action="?/res-add"
+				class="edit-form"
+				use:enhance={() => {
+					return async ({ result, update }) => {
+						if (result.type === 'success') {
+							resDraft = emptyResDraft();
+							extractText = '';
+							extractDocId = '';
+							extractMsg = '';
+						}
+						await update();
+					};
+				}}
+			>
+				<select name="reservation_type" aria-label="type" bind:value={resDraft.reservation_type}>
 					{#each ['accommodation', 'flight', 'restaurant', 'transport', 'other'] as t (t)}
 						<option value={t}>{t}</option>
 					{/each}
 				</select>
-				<input name="title" placeholder="Title (e.g. Hôtel d'Europe)" required />
-				<input name="confirmation_code" placeholder="Confirmation code" />
-				<label class="dt">Start <input type="datetime-local" name="start_at" /></label>
-				<label class="dt">End <input type="datetime-local" name="end_at" /></label>
-				<textarea name="notes" rows="2" placeholder="Notes"></textarea>
+				<input
+					name="title"
+					placeholder="Title (e.g. Hôtel d'Europe)"
+					required
+					bind:value={resDraft.title}
+				/>
+				<input
+					name="confirmation_code"
+					placeholder="Confirmation code"
+					bind:value={resDraft.confirmation_code}
+				/>
+				<input name="status" placeholder="Status" bind:value={resDraft.status} />
+				<label class="dt"
+					>Start <input type="datetime-local" name="start_at" bind:value={resDraft.start_at} /></label
+				>
+				<label class="dt"
+					>End <input type="datetime-local" name="end_at" bind:value={resDraft.end_at} /></label
+				>
+				<textarea name="notes" rows="2" placeholder="Notes" bind:value={resDraft.notes}></textarea>
 				<button class="btn small primary" type="submit">Add reservation</button>
 			</form>
 		</details>
@@ -1037,6 +1183,35 @@
 	.textdoc-form textarea {
 		flex: 1 1 100%;
 		min-height: 80px;
+	}
+	.extract {
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 10px 12px;
+		margin-bottom: 12px;
+		background: var(--bg);
+	}
+	.extract-head {
+		margin: 0 0 8px;
+		font-size: 0.82rem;
+		font-weight: 600;
+		color: var(--muted);
+	}
+	.extract-form {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		align-items: flex-start;
+		margin-bottom: 8px;
+	}
+	.extract-form textarea {
+		flex: 1 1 100%;
+		min-height: 64px;
+	}
+	.extract-msg {
+		margin: 4px 0 0;
+		font-size: 0.82rem;
+		color: var(--link);
 	}
 	.edit summary,
 	.paste summary {

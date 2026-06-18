@@ -141,6 +141,28 @@ export function fetchObject(objectKey: string): Promise<FetchedObject> {
 	return getObject(objectKey);
 }
 
+export interface AttachmentSource {
+	kind: 'file' | 'text';
+	mime_type: string;
+	object_key: string | null;
+	text_content: string | null;
+}
+
+/** Resolve an attachment for LLM extraction, enforcing ownership via the trips join. */
+export async function getAttachmentSource(
+	ownerId: number,
+	attachmentId: number
+): Promise<AttachmentSource | null> {
+	const res = await query<AttachmentSource>(
+		`SELECT a.kind, a.mime_type, a.object_key, a.text_content
+		   FROM attachments a
+		   JOIN trips t ON t.id = a.trip_id
+		  WHERE a.id = $1 AND t.owner_id = $2 AND a.status = 'active'`,
+		[attachmentId, ownerId]
+	);
+	return res.rows[0] ?? null;
+}
+
 /**
  * Delete an attachment: remove the Spaces object first, then the DB row. If the
  * object delete fails, mark the row 'delete_pending' (so metadata never claims a
