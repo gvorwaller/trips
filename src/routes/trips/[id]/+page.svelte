@@ -1256,6 +1256,14 @@
 	.drag-handle:active {
 		cursor: grabbing;
 	}
+	/* iOS/WebKit doesn't fire HTML5 drag-and-drop on touch, so the handle would
+	   highlight but do nothing. Hide it on touch devices — reordering there uses
+	   the ↑/↓, indent/outdent, and insert buttons (td-4f7d9b follow-up). */
+	@media (hover: none) and (pointer: coarse) {
+		.drag-handle {
+			display: none;
+		}
+	}
 	li.drop-before {
 		box-shadow: inset 0 2px 0 0 var(--link);
 	}
