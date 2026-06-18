@@ -1,6 +1,6 @@
 import { query } from '$lib/db';
 
-export type HitKind = 'trip' | 'place' | 'packing' | 'reservation';
+export type HitKind = 'trip' | 'place' | 'packing' | 'reservation' | 'document';
 
 export interface SearchHit {
 	kind: HitKind;
@@ -33,6 +33,11 @@ export async function search(ownerId: number, q: string): Promise<SearchHit[]> {
 		 SELECT 'reservation', t.id, t.name, r.title, r.id
 		   FROM reservations r JOIN trips t ON t.id = r.trip_id
 		  WHERE t.owner_id = $1 AND lower(r.title) LIKE $2
+		 UNION ALL
+		 SELECT 'document', t.id, t.name, a.original_name, a.id
+		   FROM attachments a JOIN trips t ON t.id = a.trip_id
+		  WHERE t.owner_id = $1 AND a.status = 'active'
+		    AND (lower(a.original_name) LIKE $2 OR lower(COALESCE(a.text_content, '')) LIKE $2)
 		 LIMIT 50`,
 		[ownerId, like]
 	);

@@ -11,8 +11,13 @@ export interface Attachment {
 	original_name: string;
 	mime_type: string;
 	size_bytes: number;
+	kind: 'file' | 'text';
+	text_content: string | null;
 	uploaded_at: string;
 }
+
+/** Cap a pasted text document well under the 30 MB column CHECK. */
+export const MAX_TEXT_DOC_BYTES = 1_000_000;
 
 export interface AttachmentLinks {
 	reservation_id?: number | null;
@@ -23,13 +28,42 @@ export interface AttachmentLinks {
 export async function listAttachmentsForTrip(tripId: number): Promise<Attachment[]> {
 	const res = await query<Attachment>(
 		`SELECT id, trip_id, reservation_id, itinerary_item_id, original_name, mime_type,
-		        size_bytes::int AS size_bytes, uploaded_at
+		        size_bytes::int AS size_bytes, kind, text_content, uploaded_at
 		   FROM attachments
 		  WHERE trip_id = $1 AND status = 'active'
 		  ORDER BY uploaded_at DESC`,
 		[tripId]
 	);
 	return res.rows;
+}
+
+/**
+ * Save pasted text as a "document" row (td-072807) — no Spaces object, body
+ * stored inline so it stays searchable/editable. Caller must have verified trip
+ * ownership. Returns the new id, or an error result for empty/oversized text.
+ */
+export async function createTextDocument(
+	tripId: number,
+	title: string,
+	text: string,
+	links: AttachmentLinks = {}
+): Promise<UploadResult> {
+	const body = text.trim();
+	if (!body) return { ok: false, status: 400, error: 'Text is empty.' };
+	const size = Buffer.byteLength(body, 'utf8');
+	if (size > MAX_TEXT_DOC_BYTES) {
+		return { ok: false, status: 400, error: 'Text is too large.' };
+	}
+	const name = (title.trim() || 'Pasted note').slice(0, 200);
+	const res = await query<{ id: number }>(
+		`INSERT INTO attachments
+		   (trip_id, reservation_id, itinerary_item_id, original_name, mime_type,
+		    size_bytes, object_key, kind, text_content, status)
+		 VALUES ($1, $2, $3, $4, 'text/plain', $5, NULL, 'text', $6, 'active')
+		 RETURNING id`,
+		[tripId, links.reservation_id ?? null, links.itinerary_item_id ?? null, name, size, body]
+	);
+	return { ok: true, id: res.rows[0].id };
 }
 
 export type UploadResult = { ok: true; id: number } | { ok: false; status: number; error: string };
@@ -97,7 +131,7 @@ export async function getAttachmentForDownload(
 		`SELECT a.object_key, a.mime_type, a.original_name
 		   FROM attachments a
 		   JOIN trips t ON t.id = a.trip_id
-		  WHERE a.id = $1 AND t.owner_id = $2 AND a.status = 'active'`,
+		  WHERE a.id = $1 AND t.owner_id = $2 AND a.status = 'active' AND a.kind = 'file'`,
 		[attachmentId, ownerId]
 	);
 	return res.rows[0] ?? null;
@@ -113,17 +147,23 @@ export function fetchObject(objectKey: string): Promise<FetchedObject> {
  * file that's gone, and a later sweep can retry) and report failure.
  */
 export async function deleteAttachment(tripId: number, attachmentId: number): Promise<boolean> {
-	const row = await query<{ object_key: string }>(
+	const row = await query<{ object_key: string | null }>(
 		`SELECT object_key FROM attachments WHERE id = $1 AND trip_id = $2`,
 		[attachmentId, tripId]
 	);
 	if (row.rowCount === 0) return false;
 
-	try {
-		await deleteObject(row.rows[0].object_key);
-	} catch {
-		await query(`UPDATE attachments SET status = 'delete_pending' WHERE id = $1`, [attachmentId]);
-		return false;
+	// Text documents have no Spaces object — just drop the row.
+	const objectKey = row.rows[0].object_key;
+	if (objectKey) {
+		try {
+			await deleteObject(objectKey);
+		} catch {
+			await query(`UPDATE attachments SET status = 'delete_pending' WHERE id = $1`, [
+				attachmentId
+			]);
+			return false;
+		}
 	}
 
 	await query(`DELETE FROM attachments WHERE id = $1 AND trip_id = $2`, [attachmentId, tripId]);

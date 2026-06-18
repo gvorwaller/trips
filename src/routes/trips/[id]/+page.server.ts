@@ -18,6 +18,7 @@ import {
 	deleteList,
 	assertListInTrip,
 	createPackingItem,
+	createPackingItemAt,
 	bulkCreatePacking,
 	updatePackingItem,
 	deletePackingItem
@@ -26,7 +27,8 @@ import {
 	listTemplates,
 	applyTemplate,
 	saveListAsTemplate,
-	seedStarterTemplate
+	seedStarterTemplate,
+	deleteTemplate
 } from '$server/templates';
 import { duplicateTrip } from '$server/clone';
 import { runTreeOp, type TreeOp } from '$server/tree-sql';
@@ -38,7 +40,12 @@ import {
 	deleteReservation,
 	parseReservationForm
 } from '$server/reservations';
-import { listAttachmentsForTrip, uploadAttachment, deleteAttachment } from '$server/attachments';
+import {
+	listAttachmentsForTrip,
+	uploadAttachment,
+	createTextDocument,
+	deleteAttachment
+} from '$server/attachments';
 import { MAX_ATTACHMENT_BYTES } from '$lib/filevalidate';
 
 function parseId(param: string | FormDataEntryValue | null): number {
@@ -214,6 +221,23 @@ export const actions: Actions = {
 		return { ok: true };
 	},
 
+	'pack-add-at': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const listId = parseId(form.get('list_id'));
+		await assertListInTrip(tripId, listId);
+		const name = (form.get('name') ?? '').toString().trim();
+		if (!name) return fail(400, { error: 'Item name is required.' });
+		const pos = form.get('position') === 'above' ? 'above' : 'below';
+		const qty = Number(form.get('quantity'));
+		await createPackingItemAt(listId, parseId(form.get('ref_id')), pos, {
+			name: name.slice(0, 300),
+			quantity: Number.isInteger(qty) && qty > 0 ? qty : 1
+		});
+		return { ok: true };
+	},
+
 	'pack-paste': async ({ params, request, locals }) => {
 		const { ownerId, tripId } = ctx(locals, params);
 		await ownTrip(ownerId, tripId);
@@ -289,6 +313,14 @@ export const actions: Actions = {
 		return { ok: true };
 	},
 
+	'tmpl-delete': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		await deleteTemplate(ownerId, parseId(form.get('template_id')));
+		return { ok: true };
+	},
+
 	// ── Reservations ───────────────────────────────────────
 	'res-add': async ({ params, request, locals }) => {
 		const { ownerId, tripId } = ctx(locals, params);
@@ -332,6 +364,19 @@ export const actions: Actions = {
 		}
 		const bytes = new Uint8Array(await file.arrayBuffer());
 		const result = await uploadAttachment(tripId, file.name, bytes, {
+			reservation_id: optId(form.get('reservation_id'))
+		});
+		if (!result.ok) return fail(result.status, { error: result.error });
+		return { ok: true };
+	},
+
+	'doc-text-add': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const text = (form.get('text') ?? '').toString();
+		const title = (form.get('title') ?? '').toString();
+		const result = await createTextDocument(tripId, title, text, {
 			reservation_id: optId(form.get('reservation_id'))
 		});
 		if (!result.ok) return fail(result.status, { error: result.error });

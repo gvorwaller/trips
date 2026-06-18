@@ -6,7 +6,8 @@
 		trip: 'Trip',
 		place: 'Place',
 		packing: 'Packing',
-		reservation: 'Reservation'
+		reservation: 'Reservation',
+		document: 'Document'
 	};
 </script>
 

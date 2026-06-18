@@ -17,6 +17,18 @@
 	const isViewer = $derived(data.user?.role === 'viewer');
 	let selectedPin = $state<number | null>(null);
 
+	// Inline "insert item above/below this row" (td-4aa8c4). Clicking a row's ＋
+	// opens a one-off input positioned exactly where the new item will land, so a
+	// mid-list item arrives in place without repeated move-up/down clicks.
+	let packInsert = $state<{ refId: number; position: 'above' | 'below' } | null>(null);
+	const openInsert = (refId: number, position: 'above' | 'below') => (packInsert = { refId, position });
+	const isInserting = (refId: number, position: 'above' | 'below') =>
+		packInsert?.refId === refId && packInsert?.position === position;
+	// Focus the field as soon as the inline insert form appears.
+	function autofocus(node: HTMLInputElement) {
+		node.focus();
+	}
+
 	// Single shared confirm-delete modal. Every ✕ / Delete control opens this
 	// instead of submitting immediately, so no deletion (and no parent_id
 	// ON DELETE CASCADE wipe of children) happens without confirmation. (td-02acd0)
@@ -283,6 +295,31 @@
 	</span>
 {/snippet}
 
+<!-- inline "insert item here" form, rendered above or below the reference row -->
+{#snippet packInsertForm(listId: number, refId: number, position: 'above' | 'below', depth: number)}
+	<li style="padding-left: {depth * 22}px">
+		<form
+			method="POST"
+			action="?/pack-add-at"
+			class="add-row insert-row"
+			use:enhance={() => {
+				return async ({ result, update }) => {
+					if (result.type === 'success') packInsert = null;
+					await update();
+				};
+			}}
+		>
+			<input type="hidden" name="list_id" value={listId} />
+			<input type="hidden" name="ref_id" value={refId} />
+			<input type="hidden" name="position" value={position} />
+			<input name="name" placeholder="Insert {position}…" required use:autofocus />
+			<input name="quantity" type="number" min="1" value="1" class="qty" aria-label="quantity" />
+			<button class="btn small primary" type="submit">Add</button>
+			<button class="btn small" type="button" onclick={() => (packInsert = null)}>Cancel</button>
+		</form>
+	</li>
+{/snippet}
+
 <!-- ── PLACES ─────────────────────────────────────────── -->
 <div class="card">
 	<h2>Places</h2>
@@ -467,6 +504,12 @@
 			<ul class="outline">
 				{#each rows as { node, depth } (node.id)}
 					{#if !packHidden.has(node.id)}
+						{#if !isViewer && isInserting(node.id, 'above')}{@render packInsertForm(
+								list.id,
+								node.id,
+								'above',
+								depth
+							)}{/if}
 						<li style="padding-left: {depth * 22}px">
 							<div class="line">
 								{#if packParents.has(node.id)}
@@ -490,7 +533,16 @@
 							<span class="grow" class:done={packChecked(packStats.get(node.id))}>
 								{node.name}{#if node.quantity > 1}<span class="muted"> ×{node.quantity}</span>{/if}
 							</span>
-							{#if !isViewer}{@render treeControls(
+							{#if !isViewer}
+								<span class="insert-controls">
+									<button type="button" title="insert above" onclick={() => openInsert(node.id, 'above')}
+										>＋↑</button
+									>
+									<button type="button" title="insert below" onclick={() => openInsert(node.id, 'below')}
+										>＋↓</button
+									>
+								</span>
+								{@render treeControls(
 									node.id,
 									'pack-move',
 									'pack-delete',
@@ -500,6 +552,12 @@
 								)}{/if}
 						</div>
 					</li>
+					{#if !isViewer && isInserting(node.id, 'below')}{@render packInsertForm(
+							list.id,
+							node.id,
+							'below',
+							depth
+						)}{/if}
 					{/if}
 				{/each}
 			</ul>
@@ -549,10 +607,27 @@
 			{:else}
 				<span class="muted">Apply a template:</span>
 				{#each data.templates as t (t.id)}
-					<form method="POST" action="?/tmpl-apply" use:enhance class="inline">
-						<input type="hidden" name="template_id" value={t.id} />
-						<button class="btn small" type="submit">{t.name} ({t.item_count})</button>
-					</form>
+					<span class="tmpl-chip">
+						<form method="POST" action="?/tmpl-apply" use:enhance class="inline">
+							<input type="hidden" name="template_id" value={t.id} />
+							<button class="btn small" type="submit">{t.name} ({t.item_count})</button>
+						</form>
+						{#if !isViewer}
+							<button
+								type="button"
+								class="del"
+								title="delete template"
+								onclick={() =>
+									(pendingDelete = {
+										action: 'tmpl-delete',
+										fields: { template_id: t.id },
+										heading: 'Delete this template?',
+										body: `“${t.name}” will be permanently removed. Packing lists already created from it are not affected.`,
+										confirmLabel: 'Delete'
+									})}>✕</button
+							>
+						{/if}
+					</span>
 				{/each}
 			{/if}
 		</div>
@@ -667,13 +742,21 @@
 				<li>
 					<div class="line">
 						<span class="grow">
-							<a
-								class="ttl"
-								href="/trips/{data.trip.id}/attachments/{a.id}"
-								target="_blank"
-								rel="noopener">{a.original_name}</a
-							>
-							<div class="meta">{a.mime_type} · {fmtSize(a.size_bytes)}</div>
+							{#if a.kind === 'text'}
+								<details class="textdoc">
+									<summary class="ttl">{a.original_name}</summary>
+									<pre class="textdoc-body">{a.text_content}</pre>
+								</details>
+								<div class="meta">text · {fmtSize(a.size_bytes)}</div>
+							{:else}
+								<a
+									class="ttl"
+									href="/trips/{data.trip.id}/attachments/{a.id}"
+									target="_blank"
+									rel="noopener">{a.original_name}</a
+								>
+								<div class="meta">{a.mime_type} · {fmtSize(a.size_bytes)}</div>
+							{/if}
 						</span>
 						{#if !isViewer}
 							<button
@@ -708,6 +791,18 @@
 			<button class="btn small primary" type="submit">Upload</button>
 		</form>
 		<p class="muted" style="font-size: 0.78rem">PDF or image, up to 30 MB. Stored privately.</p>
+		<details class="paste">
+			<summary>Paste text instead</summary>
+			<form method="POST" action="?/doc-text-add" use:enhance class="add-row textdoc-form">
+				<input name="title" placeholder="Title (e.g. Hotel confirmation email)" />
+				<textarea name="text" rows="4" placeholder="Paste an email body or any note…" required
+				></textarea>
+				<button class="btn small primary" type="submit">Save text</button>
+			</form>
+			<p class="muted" style="font-size: 0.78rem">
+				Saved as a searchable note — no file needed. Good for confirmation emails on a phone.
+			</p>
+		</details>
 	{/if}
 </div>
 
@@ -905,6 +1000,44 @@
 	.row-controls button.del {
 		color: var(--danger);
 	}
+	.insert-controls {
+		display: flex;
+		gap: 2px;
+		flex-shrink: 0;
+	}
+	.insert-controls button {
+		border: 1px solid var(--border);
+		background: var(--card);
+		border-radius: 6px;
+		min-width: 30px;
+		min-height: 32px;
+		color: var(--muted);
+		font-size: 0.8rem;
+	}
+	.insert-row {
+		margin: 2px 0;
+	}
+	.textdoc summary {
+		cursor: pointer;
+	}
+	.textdoc-body {
+		white-space: pre-wrap;
+		word-break: break-word;
+		margin: 6px 0 0;
+		padding: 8px 10px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		font-family: inherit;
+		font-size: 0.85rem;
+	}
+	.textdoc-form {
+		flex-wrap: wrap;
+	}
+	.textdoc-form textarea {
+		flex: 1 1 100%;
+		min-height: 80px;
+	}
 	.edit summary,
 	.paste summary {
 		cursor: pointer;
@@ -996,5 +1129,10 @@
 		flex-wrap: wrap;
 		gap: 6px;
 		align-items: center;
+	}
+	.tmpl-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 2px;
 	}
 </style>

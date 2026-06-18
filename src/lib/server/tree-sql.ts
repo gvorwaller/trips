@@ -5,6 +5,7 @@ import {
 	computeIndent,
 	computeOutdent,
 	computeReparent,
+	childrenOf,
 	type Change,
 	type TreeNode
 } from './tree';
@@ -67,6 +68,34 @@ export async function nextSortOrder(
 		[containerId, parentId]
 	);
 	return res.rows[0].next;
+}
+
+/**
+ * Place a freshly-inserted node (already appended to the end of its sibling
+ * group) immediately above or below a reference sibling, then reindex the group.
+ * Runs inside the caller's transaction (takes the client) so the INSERT and the
+ * reorder commit together. Returns the new node's index among its siblings.
+ */
+export async function placeNodeRelative(
+	client: pg.PoolClient,
+	table: TreeTable,
+	containerId: number,
+	newId: number,
+	parentId: number | null,
+	refId: number,
+	position: 'above' | 'below'
+): Promise<void> {
+	const nodes = await loadNodes(client, table, containerId);
+	// Index of the reference among siblings as they stand before placing newId.
+	const sibs = childrenOf(
+		nodes.filter((n) => n.id !== newId),
+		parentId
+	);
+	const refIdx = sibs.findIndex((n) => n.id === refId);
+	if (refIdx === -1) throw new Error('Reference item is not a sibling');
+	const targetIdx = position === 'below' ? refIdx + 1 : refIdx;
+	const changes = computeReparent(nodes, newId, parentId, targetIdx);
+	await applyChanges(client, table, changes);
 }
 
 /** Run a keyboard tree op (move/indent/outdent). containerId must be pre-authorized. */

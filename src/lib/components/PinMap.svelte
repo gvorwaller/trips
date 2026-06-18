@@ -40,6 +40,15 @@
 				fullscreenControl: false
 			});
 
+			const boundsAround = (lat: number, lng: number, km: number) => {
+				const dLat = km / 111.32;
+				const dLng = km / (111.32 * Math.cos((lat * Math.PI) / 180));
+				return new gmaps.LatLngBounds(
+					{ lat: lat - dLat, lng: lng - dLng },
+					{ lat: lat + dLat, lng: lng + dLng }
+				);
+			};
+
 			const bounds = new gmaps.LatLngBounds();
 			for (const pin of pins) {
 				const pos = { lat: pin.lat, lng: pin.lon };
@@ -51,8 +60,15 @@
 				marker.addListener('click', () => onselect(pin.id));
 				bounds.extend(pos);
 			}
-			map.fitBounds(bounds);
-			if (pins.length === 1) map.setZoom(13);
+			// A single pin has zero-area bounds, so fitBounds would zoom in as far
+			// as it can. Frame it with a 20km buffer instead (matches MapPicker), so
+			// a one-place trip shows useful surrounding context rather than rooftops.
+			if (pins.length === 1) {
+				const only = pins[0];
+				map.fitBounds(boundsAround(only.lat, only.lon, 20));
+			} else {
+				map.fitBounds(bounds);
+			}
 		} catch (err) {
 			loadError = err instanceof Error ? err.message : 'Could not load the map.';
 		}

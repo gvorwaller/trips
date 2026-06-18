@@ -1,5 +1,5 @@
 import { query, withTransaction } from '$lib/db';
-import { nextSortOrder } from './tree-sql';
+import { nextSortOrder, placeNodeRelative } from './tree-sql';
 
 export interface PackingList {
 	id: number;
@@ -137,6 +137,45 @@ export async function createPackingItem(listId: number, item: NewPackingItem): P
 			]
 		);
 		return res.rows[0].id;
+	});
+}
+
+/**
+ * Insert a new item directly above or below an existing one (td-4aa8c4), as a
+ * sibling at the same level — so a freshly-added item lands where you want it
+ * without repeated move-up/down clicks. Appends then reorders in one
+ * transaction. Returns the new id, or null if the reference isn't in the list.
+ */
+export async function createPackingItemAt(
+	listId: number,
+	refId: number,
+	position: 'above' | 'below',
+	item: Pick<NewPackingItem, 'name' | 'quantity' | 'category' | 'notes'>
+): Promise<number | null> {
+	return withTransaction(async (client) => {
+		const ref = await client.query<{ parent_id: number | null }>(
+			`SELECT parent_id FROM packing_items WHERE id = $1 AND list_id = $2`,
+			[refId, listId]
+		);
+		if (ref.rowCount === 0) return null;
+		const parentId = ref.rows[0].parent_id;
+		const sort = await nextSortOrder(client, 'packing_items', listId, parentId);
+		const ins = await client.query<{ id: number }>(
+			`INSERT INTO packing_items (list_id, parent_id, sort_order, name, quantity, category, notes)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+			[
+				listId,
+				parentId,
+				sort,
+				item.name,
+				item.quantity ?? 1,
+				item.category ?? null,
+				item.notes ?? null
+			]
+		);
+		const newId = ins.rows[0].id;
+		await placeNodeRelative(client, 'packing_items', listId, newId, parentId, refId, position);
+		return newId;
 	});
 }
 
