@@ -9,6 +9,7 @@ export interface Attachment {
 	reservation_id: number | null;
 	itinerary_item_id: number | null;
 	original_name: string;
+	display_name: string | null;
 	mime_type: string;
 	size_bytes: number;
 	kind: 'file' | 'text';
@@ -22,13 +23,14 @@ export const MAX_TEXT_DOC_BYTES = 1_000_000;
 export interface AttachmentLinks {
 	reservation_id?: number | null;
 	itinerary_item_id?: number | null;
+	display_name?: string | null;
 }
 
 /** Active attachments for a trip (newest first). */
 export async function listAttachmentsForTrip(tripId: number): Promise<Attachment[]> {
 	const res = await query<Attachment>(
-		`SELECT id, trip_id, reservation_id, itinerary_item_id, original_name, mime_type,
-		        size_bytes::int AS size_bytes, kind, text_content, uploaded_at
+		`SELECT id, trip_id, reservation_id, itinerary_item_id, original_name, display_name,
+		        mime_type, size_bytes::int AS size_bytes, kind, text_content, uploaded_at
 		   FROM attachments
 		  WHERE trip_id = $1 AND status = 'active'
 		  ORDER BY uploaded_at DESC`,
@@ -91,14 +93,15 @@ export async function uploadAttachment(
 	try {
 		const res = await query<{ id: number }>(
 			`INSERT INTO attachments
-			   (trip_id, reservation_id, itinerary_item_id, original_name, mime_type, size_bytes, object_key, status)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+			   (trip_id, reservation_id, itinerary_item_id, original_name, display_name, mime_type, size_bytes, object_key, status)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
 			 RETURNING id`,
 			[
 				tripId,
 				links.reservation_id ?? null,
 				links.itinerary_item_id ?? null,
 				safe,
+				links.display_name ?? null,
 				check.mime,
 				buf.length,
 				objectKey
@@ -161,6 +164,19 @@ export async function getAttachmentSource(
 		[attachmentId, ownerId]
 	);
 	return res.rows[0] ?? null;
+}
+
+/** Update the display name for an attachment. */
+export async function renameAttachment(
+	tripId: number,
+	attachmentId: number,
+	displayName: string
+): Promise<boolean> {
+	const res = await query(
+		`UPDATE attachments SET display_name = $3 WHERE id = $1 AND trip_id = $2`,
+		[attachmentId, tripId, displayName.trim().slice(0, 200) || null]
+	);
+	return (res.rowCount ?? 0) > 0;
 }
 
 /**

@@ -331,18 +331,41 @@
 	const expandPack = (rows: TreeRow[]) =>
 		(packCollapsed = bulkFold(packCollapsed, packKey, parentIds(rows), false));
 
+	// ── Section-level collapse (Places / Packing / Reservations / Documents) ──
+	const sectionKey = $derived(`trips:${data.trip.id}:sections`);
+	let sectionsCollapsed = $state<Set<string>>(new Set());
+	onMount(() => {
+		try {
+			const v = JSON.parse(localStorage.getItem(sectionKey) ?? '[]');
+			sectionsCollapsed = new Set(Array.isArray(v) ? v.filter((s: unknown) => typeof s === 'string') : []);
+		} catch { /* use empty set */ }
+	});
+	function saveSections(s: Set<string>) {
+		if (browser) localStorage.setItem(sectionKey, JSON.stringify([...s]));
+	}
+	function toggleSection(name: string) {
+		const next = new Set(sectionsCollapsed);
+		if (next.has(name)) next.delete(name);
+		else next.add(name);
+		saveSections(next);
+		sectionsCollapsed = next;
+	}
+
 	// Print a one-page trip sheet (td-a2d073). Collapsed branches are removed from
 	// the DOM, so expand everything first (in memory only — don't persist to
 	// localStorage), render, print, then restore the user's fold state.
 	async function printSheet() {
 		const savedItin = itinCollapsed;
 		const savedPack = packCollapsed;
+		const savedSections = sectionsCollapsed;
 		itinCollapsed = new Set();
 		packCollapsed = new Set();
+		sectionsCollapsed = new Set();
 		await tick();
 		window.print();
 		itinCollapsed = savedItin;
 		packCollapsed = savedPack;
+		sectionsCollapsed = savedSections;
 	}
 </script>
 
@@ -390,8 +413,8 @@
 					fields: listId !== null ? { id, list_id: listId } : { id },
 					heading: 'Delete this item?',
 					body: hasChildren
-						? `“${label}” and everything nested under it will be permanently removed.`
-						: `“${label}” will be permanently removed.`,
+						? `"${label}" and everything nested under it will be permanently removed.`
+						: `"${label}" will be permanently removed.`,
 					confirmLabel: 'Delete'
 				})}>✕</button
 		>
@@ -425,8 +448,12 @@
 
 <!-- ── PLACES ─────────────────────────────────────────── -->
 <div class="card">
-	<h2>Places</h2>
+	<button class="section-toggle" type="button" onclick={() => toggleSection('places')}>
+		<span class="section-caret">{sectionsCollapsed.has('places') ? '▸' : '▾'}</span>
+		<h2>Places</h2>
+	</button>
 
+	{#if !sectionsCollapsed.has('places')}
 	{#if data.itineraryRows.length > 0}
 		<PinMap {pins} onselect={selectPin} />
 	{/if}
@@ -562,11 +589,16 @@
 			</form>
 		</details>
 	{/if}
+	{/if}
 </div>
 
 <!-- ── PACKING ────────────────────────────────────────── -->
 <div class="card">
-	<h2>Packing</h2>
+	<button class="section-toggle" type="button" onclick={() => toggleSection('packing')}>
+		<span class="section-caret">{sectionsCollapsed.has('packing') ? '▸' : '▾'}</span>
+		<h2>Packing</h2>
+	</button>
+	{#if !sectionsCollapsed.has('packing')}
 	{#each data.packing as { list, rows, total, checked } (list.id)}
 		{@const packHidden = hiddenIds(rows, packCollapsed)}
 		{@const packParents = parentIds(rows)}
@@ -592,7 +624,7 @@
 								action: 'list-delete',
 								fields: { list_id: list.id },
 								heading: 'Delete this packing list?',
-								body: `“${list.name}” and all ${total} item${total === 1 ? '' : 's'} in it will be permanently removed.`,
+								body: `"${list.name}" and all ${total} item${total === 1 ? '' : 's'} in it will be permanently removed.`,
 								confirmLabel: 'Delete list'
 							})}>✕ list</button
 					>
@@ -620,70 +652,77 @@
 							ondragover={(e) => onRowDragOver(e, list.id, node.id)}
 							ondrop={() => onRowDrop(list.id, rows)}
 						>
-							<div class="line">
+							<div class="line pack-line">
+								<div class="pack-main">
+									{#if !isViewer}
+										<span
+											class="drag-handle"
+											title="drag to reorder"
+											draggable="true"
+											ondragstart={() => {
+												dragId = node.id;
+												dragListId = list.id;
+											}}
+											ondragend={() => {
+												dragId = null;
+												dragListId = null;
+												dropTarget = null;
+											}}
+											role="button"
+											tabindex="-1"
+											aria-label="drag to reorder">⠿</span
+										>
+									{/if}
+									{#if packParents.has(node.id)}
+										<button
+											class="caret"
+											type="button"
+											aria-expanded={!packCollapsed.has(node.id)}
+											aria-label={packCollapsed.has(node.id) ? 'Expand' : 'Collapse'}
+											onclick={() => togglePack(node.id)}>{packCollapsed.has(node.id) ? '▸' : '▾'}</button
+										>
+									{:else}
+										<span class="caret-spacer" aria-hidden="true"></span>
+									{/if}
+									<input
+										type="checkbox"
+										class="chk"
+										checked={packChecked(packStats.get(node.id))}
+										indeterminate={packIndeterminate(packStats.get(node.id))}
+										onchange={(e) => toggleCheck(node.id, e.currentTarget.checked)}
+									/>
+									<span class="grow" class:done={packChecked(packStats.get(node.id))}>
+										{node.name}{#if node.quantity > 1}<span class="muted"> ×{node.quantity}</span>{/if}
+										{#if node.notes}<div class="meta note">{node.notes}</div>{/if}
+									</span>
+								</div>
 								{#if !isViewer}
-									<span
-										class="drag-handle"
-										title="drag to reorder"
-										draggable="true"
-										ondragstart={() => {
-											dragId = node.id;
-											dragListId = list.id;
-										}}
-										ondragend={() => {
-											dragId = null;
-											dragListId = null;
-											dropTarget = null;
-										}}
-										role="button"
-										tabindex="-1"
-										aria-label="drag to reorder">⠿</span
-									>
+									<div class="pack-controls">
+										<span class="insert-controls">
+											<button type="button" title="insert above" onclick={() => openInsert(node.id, 'above')}
+												>＋↑</button
+											>
+											<button type="button" title="insert below" onclick={() => openInsert(node.id, 'below')}
+												>＋↓</button
+											>
+										</span>
+										{@render treeControls(
+											node.id,
+											'pack-move',
+											'pack-delete',
+											list.id,
+											node.name,
+											rows.some((r) => r.node.parent_id === node.id)
+										)}
+									</div>
 								{/if}
-								{#if packParents.has(node.id)}
-									<button
-										class="caret"
-										type="button"
-										aria-expanded={!packCollapsed.has(node.id)}
-										aria-label={packCollapsed.has(node.id) ? 'Expand' : 'Collapse'}
-										onclick={() => togglePack(node.id)}>{packCollapsed.has(node.id) ? '▸' : '▾'}</button
-									>
-								{:else}
-									<span class="caret-spacer" aria-hidden="true"></span>
-								{/if}
-								<input
-									type="checkbox"
-									class="chk"
-									checked={packChecked(packStats.get(node.id))}
-									indeterminate={packIndeterminate(packStats.get(node.id))}
-									onchange={(e) => toggleCheck(node.id, e.currentTarget.checked)}
-								/>
-							<span class="grow" class:done={packChecked(packStats.get(node.id))}>
-								{node.name}{#if node.quantity > 1}<span class="muted"> ×{node.quantity}</span>{/if}
-								{#if node.notes}<div class="meta note">{node.notes}</div>{/if}
-							</span>
-							{#if !isViewer}
-								<span class="insert-controls">
-									<button type="button" title="insert above" onclick={() => openInsert(node.id, 'above')}
-										>＋↑</button
-									>
-									<button type="button" title="insert below" onclick={() => openInsert(node.id, 'below')}
-										>＋↓</button
-									>
-								</span>
-								{@render treeControls(
-									node.id,
-									'pack-move',
-									'pack-delete',
-									list.id,
-									node.name,
-									rows.some((r) => r.node.parent_id === node.id)
-								)}{/if}
-						</div>
+							</div>
 						{#if !isViewer}
 							<details class="edit" style="padding-left: {depth * 22 + 26}px">
 								<summary>edit</summary>
-								<form method="POST" action="?/pack-edit" use:enhance class="edit-form">
+								<form method="POST" action="?/pack-edit" use:enhance={() => {
+									return async ({ update }) => { await update({ reset: false }); };
+								}} class="edit-form">
 									<input type="hidden" name="id" value={node.id} />
 									<input type="hidden" name="list_id" value={list.id} />
 									<input type="hidden" name="category" value={node.category ?? ''} />
@@ -745,7 +784,7 @@
 		<div class="templates">
 			{#if data.templates.length === 0}
 				<form method="POST" action="?/tmpl-seed" use:enhance class="inline">
-					<button class="btn small" type="submit">Add starter “Essentials” template</button>
+					<button class="btn small" type="submit">Add starter "Essentials" template</button>
 				</form>
 			{:else}
 				<span class="muted">Apply a template:</span>
@@ -765,7 +804,7 @@
 										action: 'tmpl-delete',
 										fields: { template_id: t.id },
 										heading: 'Delete this template?',
-										body: `“${t.name}” will be permanently removed. Packing lists already created from it are not affected.`,
+										body: `"${t.name}" will be permanently removed. Packing lists already created from it are not affected.`,
 										confirmLabel: 'Delete'
 									})}>✕</button
 							>
@@ -775,11 +814,16 @@
 			{/if}
 		</div>
 	{/if}
+	{/if}
 </div>
 
 <!-- ── RESERVATIONS ───────────────────────────────────── -->
 <div class="card">
-	<h2>Reservations</h2>
+	<button class="section-toggle" type="button" onclick={() => toggleSection('reservations')}>
+		<span class="section-caret">{sectionsCollapsed.has('reservations') ? '▸' : '▾'}</span>
+		<h2>Reservations</h2>
+	</button>
+	{#if !sectionsCollapsed.has('reservations')}
 	{#if data.reservations.length === 0}
 		<p class="muted">No reservations yet.</p>
 	{:else}
@@ -799,7 +843,12 @@
 								{#if r.end_at}
 									→ {fmtDateTime(r.end_at)}{/if}
 							</div>
-							{#if r.notes}<div class="meta">{r.notes}</div>{/if}
+							{#if r.notes}
+								<details class="res-notes">
+									<summary>Show details</summary>
+									<pre class="res-notes-body">{r.notes}</pre>
+								</details>
+							{/if}
 						</span>
 						{#if !isViewer}
 							<button
@@ -811,7 +860,7 @@
 										action: 'res-delete',
 										fields: { id: r.id },
 										heading: 'Delete this reservation?',
-										body: `“${r.title}” will be permanently removed.`,
+										body: `"${r.title}" will be permanently removed.`,
 										confirmLabel: 'Delete'
 									})}>✕</button
 							>
@@ -972,11 +1021,16 @@
 			</form>
 		</details>
 	{/if}
+	{/if}
 </div>
 
 <!-- ── ATTACHMENTS ────────────────────────────────────── -->
 <div class="card">
-	<h2>Documents</h2>
+	<button class="section-toggle" type="button" onclick={() => toggleSection('documents')}>
+		<span class="section-caret">{sectionsCollapsed.has('documents') ? '▸' : '▾'}</span>
+		<h2>Documents</h2>
+	</button>
+	{#if !sectionsCollapsed.has('documents')}
 	{#if data.attachments.length === 0}
 		<p class="muted">No documents yet.</p>
 	{:else}
@@ -987,18 +1041,25 @@
 						<span class="grow">
 							{#if a.kind === 'text'}
 								<details class="textdoc">
-									<summary class="ttl">{a.original_name}</summary>
+									<summary class="ttl">{a.display_name || a.original_name}</summary>
 									<pre class="textdoc-body">{a.text_content}</pre>
 								</details>
 								<div class="meta">text · {fmtSize(a.size_bytes)}</div>
 							{:else}
-								<a
-									class="ttl"
-									href="/trips/{data.trip.id}/attachments/{a.id}"
-									target="_blank"
-									rel="noopener">{a.original_name}</a
-								>
-								<div class="meta">{a.mime_type} · {fmtSize(a.size_bytes)}</div>
+								<span class="ttl">{a.display_name || a.original_name}</span>
+								<div class="meta doc-links">
+									{a.mime_type} · {fmtSize(a.size_bytes)}
+									<a
+										class="chip-link"
+										href="/trips/{data.trip.id}/attachments/{a.id}"
+										target="_blank"
+										rel="noopener">View</a
+									>
+									<a
+										class="chip-link"
+										href="/trips/{data.trip.id}/attachments/{a.id}?download"
+									>Download</a>
+								</div>
 							{/if}
 						</span>
 						{#if !isViewer}
@@ -1011,12 +1072,24 @@
 										action: 'attach-delete',
 										fields: { id: a.id },
 										heading: 'Delete this document?',
-										body: `“${a.original_name}” will be permanently removed from storage.`,
+										body: `"${a.display_name || a.original_name}" will be permanently removed from storage.`,
 										confirmLabel: 'Delete'
 									})}>✕</button
 							>
 						{/if}
 					</div>
+					{#if !isViewer}
+						<details class="edit">
+							<summary>edit</summary>
+							<form method="POST" action="?/attach-rename" use:enhance={() => {
+								return async ({ update }) => { await update({ reset: false }); };
+							}} class="edit-form">
+								<input type="hidden" name="id" value={a.id} />
+								<input name="display_name" value={a.display_name ?? ''} placeholder="Display name (optional)" />
+								<button class="btn small primary" type="submit">Save</button>
+							</form>
+						</details>
+					{/if}
 				</li>
 			{/each}
 		</ul>
@@ -1028,8 +1101,9 @@
 			action="?/attach-upload"
 			use:enhance
 			enctype="multipart/form-data"
-			class="add-row"
+			class="add-row upload-row"
 		>
+			<input name="display_name" placeholder="Label (optional)" />
 			<input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif" required />
 			<button class="btn small primary" type="submit">Upload</button>
 		</form>
@@ -1046,6 +1120,7 @@
 				Saved as a searchable note — no file needed. Good for confirmation emails on a phone.
 			</p>
 		</details>
+	{/if}
 	{/if}
 </div>
 
@@ -1064,7 +1139,7 @@
 					action: 'delete',
 					fields: {},
 					heading: 'Delete this trip?',
-					body: `“${data.trip.name}” and everything in it will be permanently removed.`,
+					body: `"${data.trip.name}" and everything in it will be permanently removed.`,
 					confirmLabel: 'Delete trip'
 				})}>Delete</button
 		>
@@ -1431,5 +1506,80 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 2px;
+	}
+	/* ── Section-level collapse toggles ── */
+	.section-toggle {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		background: none;
+		border: none;
+		padding: 0;
+		cursor: pointer;
+		width: 100%;
+		text-align: left;
+	}
+	.section-toggle h2 {
+		margin: 0;
+	}
+	.section-caret {
+		font-size: 0.9rem;
+		color: var(--muted);
+		flex-shrink: 0;
+		width: 18px;
+	}
+	/* ── Packing row: wrap controls below text on mobile ── */
+	.pack-line {
+		flex-wrap: wrap;
+	}
+	.pack-main {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: 1;
+		min-width: 0;
+	}
+	.pack-controls {
+		display: flex;
+		gap: 4px;
+		flex-shrink: 0;
+	}
+	@media (max-width: 639px) {
+		.pack-controls {
+			width: 100%;
+			padding: 4px 0 2px 54px;
+		}
+	}
+	/* ── Reservation notes toggle ── */
+	.res-notes summary {
+		cursor: pointer;
+		color: var(--link);
+		font-size: 0.82rem;
+		padding: 2px 0;
+	}
+	.res-notes-body {
+		white-space: pre-wrap;
+		word-break: break-word;
+		margin: 6px 0 0;
+		padding: 8px 10px;
+		background: var(--bg);
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		font-family: inherit;
+		font-size: 0.85rem;
+	}
+	/* ── Document links row ── */
+	.doc-links {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 6px;
+	}
+	.upload-row {
+		flex-wrap: wrap;
+	}
+	.upload-row input[name='display_name'] {
+		flex: 1;
+		min-width: 140px;
 	}
 </style>

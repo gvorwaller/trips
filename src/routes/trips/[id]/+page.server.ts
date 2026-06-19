@@ -45,7 +45,8 @@ import {
 	listAttachmentsForTrip,
 	uploadAttachment,
 	createTextDocument,
-	deleteAttachment
+	deleteAttachment,
+	renameAttachment
 } from '$server/attachments';
 import { MAX_ATTACHMENT_BYTES } from '$lib/filevalidate';
 
@@ -407,8 +408,10 @@ export const actions: Actions = {
 			return fail(400, { error: 'File exceeds the 30 MB limit.' });
 		}
 		const bytes = new Uint8Array(await file.arrayBuffer());
+		const displayName = (form.get('display_name') ?? '').toString().trim() || null;
 		const result = await uploadAttachment(tripId, file.name, bytes, {
-			reservation_id: optId(form.get('reservation_id'))
+			reservation_id: optId(form.get('reservation_id')),
+			display_name: displayName
 		});
 		if (!result.ok) return fail(result.status, { error: result.error });
 		return { ok: true };
@@ -424,6 +427,15 @@ export const actions: Actions = {
 			reservation_id: optId(form.get('reservation_id'))
 		});
 		if (!result.ok) return fail(result.status, { error: result.error });
+		return { ok: true };
+	},
+
+	'attach-rename': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const name = (form.get('display_name') ?? '').toString().trim();
+		await renameAttachment(tripId, parseId(form.get('id')), name);
 		return { ok: true };
 	},
 
