@@ -368,11 +368,26 @@
 		packCollapsed = savedPack;
 		sectionsCollapsed = savedSections;
 	}
+
+	async function printPacking() {
+		const savedSections = sectionsCollapsed;
+		const nextSections = new Set(sectionsCollapsed);
+		nextSections.delete('packing');
+		sectionsCollapsed = nextSections;
+		document.body.classList.add('print-packing-only');
+		await tick();
+		try {
+			window.print();
+		} finally {
+			document.body.classList.remove('print-packing-only');
+			sectionsCollapsed = savedSections;
+		}
+	}
 </script>
 
 <svelte:head><title>{data.trip.name}</title></svelte:head>
 
-<div class="page-head">
+<div class="page-head trip-page-head">
 	<a class="muted back" href="/">← All trips</a>
 	<h1>{data.trip.name}</h1>
 	<div class="sub">{fmtRange(data.trip.start_date, data.trip.end_date)}</div>
@@ -594,11 +609,16 @@
 </div>
 
 <!-- ── PACKING ────────────────────────────────────────── -->
-<div class="card">
-	<button class="section-toggle" type="button" onclick={() => toggleSection('packing')}>
-		<span class="section-caret">{sectionsCollapsed.has('packing') ? '▸' : '▾'}</span>
-		<h2>Packing</h2>
-	</button>
+<div class="card packing-card">
+	<div class="section-header">
+		<button class="section-toggle" type="button" onclick={() => toggleSection('packing')}>
+			<span class="section-caret">{sectionsCollapsed.has('packing') ? '▸' : '▾'}</span>
+			<h2>Packing</h2>
+		</button>
+		<button type="button" class="btn small print-btn packing-print-btn" onclick={printPacking}
+			>🖨 Print packing</button
+		>
+	</div>
 	{#if !sectionsCollapsed.has('packing')}
 	{#each data.packing as { list, rows, total, checked } (list.id)}
 		{@const packHidden = hiddenIds(rows, packCollapsed)}
@@ -1510,6 +1530,11 @@
 		gap: 2px;
 	}
 	/* ── Section-level collapse toggles ── */
+	.section-header {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
 	.section-toggle {
 		display: flex;
 		align-items: center;
@@ -1521,6 +1546,10 @@
 		width: 100%;
 		text-align: left;
 	}
+	.section-header .section-toggle {
+		flex: 1;
+		min-width: 0;
+	}
 	.section-toggle h2 {
 		margin: 0;
 	}
@@ -1529,6 +1558,9 @@
 		color: var(--muted);
 		flex-shrink: 0;
 		width: 18px;
+	}
+	.packing-print-btn {
+		flex-shrink: 0;
 	}
 	/* ── Packing row: wrap controls below text on mobile ── */
 	.pack-line {
