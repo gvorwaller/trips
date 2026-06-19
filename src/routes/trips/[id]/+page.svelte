@@ -372,20 +372,9 @@
 		}
 	}
 
-	function printPacking() {
-		const savedSections = sectionsCollapsed;
-		const nextSections = new Set(sectionsCollapsed);
-		nextSections.delete('packing');
-		sectionsCollapsed = nextSections;
-		document.body.classList.add('print-packing-only');
-		flushSync();
-		try {
-			window.print();
-		} finally {
-			document.body.classList.remove('print-packing-only');
-			sectionsCollapsed = savedSections;
-		}
-	}
+	const packingPrintHref = $derived(
+		`/trips/${data.trip.id}/packing/print?collapsed=${encodeURIComponent([...packCollapsed].join(','))}`
+	);
 </script>
 
 <svelte:head><title>{data.trip.name}</title></svelte:head>
@@ -618,9 +607,7 @@
 			<span class="section-caret">{sectionsCollapsed.has('packing') ? '▸' : '▾'}</span>
 			<h2>Packing</h2>
 		</button>
-		<button type="button" class="btn small print-btn packing-print-btn" onclick={printPacking}
-			>🖨 Print packing</button
-		>
+		<a class="btn small packing-print-btn" href={packingPrintHref}>🖨 Print packing</a>
 	</div>
 	{#if !sectionsCollapsed.has('packing')}
 	{#each data.packing as { list, rows, total, checked } (list.id)}

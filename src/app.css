@@ -708,10 +708,6 @@ select {
 		display: none !important;
 	}
 
-	body.print-packing-only .page > :not(.trip-page-head):not(.packing-card) {
-		display: none !important;
-	}
-
 	:root {
 		--bg: #fff;
 		--card: #fff;
