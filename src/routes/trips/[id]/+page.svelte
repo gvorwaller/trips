@@ -845,19 +845,28 @@
 						<div class="res-header">
 							<span class="badge need">{r.reservation_type}</span>
 							{#if !isViewer}
-								<button
-									type="button"
-									class="del"
-									title="delete"
-									onclick={() =>
-										(pendingDelete = {
-											action: 'res-delete',
-											fields: { id: r.id },
-											heading: 'Delete this reservation?',
-											body: `"${r.title}" will be permanently removed.`,
-											confirmLabel: 'Delete'
-										})}>✕</button
-								>
+								<span class="res-controls">
+									{#each ['up', 'down'] as dir}
+										<form method="POST" action="?/res-move" use:enhance>
+											<input type="hidden" name="id" value={r.id} />
+											<input type="hidden" name="direction" value={dir} />
+											<button type="submit" title="move {dir}">{dir === 'up' ? '↑' : '↓'}</button>
+										</form>
+									{/each}
+									<button
+										type="button"
+										class="del"
+										title="delete"
+										onclick={() =>
+											(pendingDelete = {
+												action: 'res-delete',
+												fields: { id: r.id },
+												heading: 'Delete this reservation?',
+												body: `"${r.title}" will be permanently removed.`,
+												confirmLabel: 'Delete'
+											})}>✕</button
+									>
+								</span>
 							{/if}
 						</div>
 						<span class="ttl">{r.title}</span>
@@ -1583,6 +1592,24 @@
 		align-items: center;
 		justify-content: space-between;
 		margin-bottom: 4px;
+	}
+	.res-controls {
+		display: flex;
+		gap: 2px;
+	}
+	.res-controls form {
+		margin: 0;
+	}
+	.res-controls button {
+		border: 1px solid var(--border);
+		background: var(--card);
+		border-radius: 6px;
+		min-width: 30px;
+		min-height: 32px;
+		color: var(--muted);
+	}
+	.res-controls button.del {
+		color: var(--danger);
 	}
 	/* ── Reservation notes toggle ── */
 	.res-notes summary {

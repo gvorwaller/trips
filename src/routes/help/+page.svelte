@@ -54,17 +54,45 @@
 		</li>
 	</ul>
 
-	<h2>Collapsing branches</h2>
+	<h2>Reservations</h2>
+	<p>
+		Add reservations (accommodation, flight, restaurant, transport, other) from the
+		<strong>Reservations</strong> section. Each reservation can carry a confirmation code, status,
+		start/end dates, and free-form notes. Long notes are tucked behind a
+		<strong>Show details</strong> toggle so they don't dominate the page.
+	</p>
+	<p>
+		Use the <strong>↑ / ↓</strong> buttons to reorder reservations however you like. The order you
+		set is saved and used everywhere (printing, viewer mode).
+	</p>
+
+	<h2>Collapsing</h2>
 	<p>
 		Any row with children shows a <strong>▾ / ▸</strong> caret — tap it to fold or unfold that
 		branch. Use <strong>Collapse all / Expand all</strong> to fold a whole list at once. This works
 		on both the itinerary and packing lists, and your folded state is remembered on this device.
 	</p>
+	<p>
+		The four main sections (Places, Packing, Reservations, Documents) also collapse — tap the
+		section heading to toggle. Section collapse state is remembered per trip on this device.
+	</p>
 
 	<h2>Documents</h2>
 	<p>
 		Attach a PDF or image (up to 30 MB) to a trip. Files are stored privately — opening one streams
-		it through the app, so there's no public link.
+		it through the app, so there's no public link. You can give each file a
+		<strong>display name</strong> (label) when uploading or via <strong>edit → rename</strong> later.
+	</p>
+	<p>
+		Tap <strong>View</strong> to open a file in an in-app viewer (with a back link to the trip), or
+		<strong>Download</strong> to save it to your device.
+	</p>
+
+	<h2>Printing</h2>
+	<p>
+		Use the browser's print function to print the full trip. Each packing list also has a
+		<strong>Print packing</strong> button that prints just that list. All collapsed sections and
+		branches are automatically expanded for printing.
 	</p>
 
 	<h2>Deleting</h2>

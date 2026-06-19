@@ -38,6 +38,7 @@ import {
 	createReservation,
 	updateReservation,
 	deleteReservation,
+	moveReservation,
 	parseReservationForm
 } from '$server/reservations';
 import { extractFromText, extractFromDocument } from '$server/reservation-extract';
@@ -392,6 +393,16 @@ export const actions: Actions = {
 		await ownTrip(ownerId, tripId);
 		const form = await request.formData();
 		await deleteReservation(tripId, parseId(form.get('id')));
+		return { ok: true };
+	},
+
+	'res-move': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const dir = form.get('direction')?.toString();
+		if (dir !== 'up' && dir !== 'down') return fail(400, { error: 'Invalid direction' });
+		await moveReservation(tripId, parseId(form.get('id')), dir);
 		return { ok: true };
 	},
 

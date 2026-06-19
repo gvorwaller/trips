@@ -31,7 +31,7 @@ export async function listReservations(tripId: number): Promise<Reservation[]> {
 	const res = await query<Reservation>(
 		`SELECT ${SELECT_COLS} FROM reservations
 		  WHERE trip_id = $1
-		  ORDER BY start_at NULLS LAST, sort_order, id`,
+		  ORDER BY sort_order, id`,
 		[tripId]
 	);
 	return res.rows;
@@ -96,6 +96,32 @@ export async function updateReservation(
 		]
 	);
 	return (res.rowCount ?? 0) > 0;
+}
+
+export async function moveReservation(
+	tripId: number,
+	id: number,
+	direction: 'up' | 'down'
+): Promise<void> {
+	await withTransaction(async (client) => {
+		const res = await client.query<{ id: number; sort_order: number }>(
+			`SELECT id, sort_order FROM reservations WHERE trip_id = $1 ORDER BY sort_order, id`,
+			[tripId]
+		);
+		const rows = res.rows;
+		const idx = rows.findIndex((r) => r.id === id);
+		if (idx === -1) throw new Error('Reservation not found');
+		const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+		if (swapIdx < 0 || swapIdx >= rows.length) return;
+		await client.query(
+			`UPDATE reservations SET sort_order = $2 WHERE id = $1 AND trip_id = $3`,
+			[rows[idx].id, rows[swapIdx].sort_order, tripId]
+		);
+		await client.query(
+			`UPDATE reservations SET sort_order = $2 WHERE id = $1 AND trip_id = $3`,
+			[rows[swapIdx].id, rows[idx].sort_order, tripId]
+		);
+	});
 }
 
 export async function deleteReservation(tripId: number, id: number): Promise<boolean> {
