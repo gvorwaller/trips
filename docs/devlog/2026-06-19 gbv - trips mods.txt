@@ -1,0 +1,12 @@
+Here's items:
+Most of them are to make the app more user friendly on mobile, which will be the primary place I think I'll use the app.
+
+1) for each major section (Places, Packing, Reservations, Documents) make each section expandable / compressable by click on section header.  
+
+2) For packing lists - mobile view in portrait mode crams in the item title such that it has to wrap across many lines, about a single word per line.  I propose moving the navigation/insert buttons just below the item description and just above the >edit toggle.
+
+3) also packing items: when I click 'edit' (expands that section for the item) it shows the text.  I have a question about that - clicking the 'edit' button again compresses the edit form - is that the same as 'cancel'?  And, when I hit 'save' button, it blanks out 'Name' and 'notes' fields in the edit panel, so if I do edit again, I'd have to re-type the name, instead of being able to modify it more.  Small UX issue.
+
+4) Reservations: I pasted an email with my flight confirmation.  Instead of showing a nice parsed and formatted version of the reservation, it basically re-creates the full email free-form.  And to see what parts it *did* find and format, I have to hit the 'edit' expansion.   I like having the details, but I can see that in the document.  I think it should show the summary information (that shows up on 'edit' expansion) with a button to show the extracted (and formatted) details.
+
+5) Documents: pasted text works fine;  but uploaded doc doesn't let me give it a meaningful name (something other than the filename, which may be cryptic).  Also (see screen shot) when I open the PDF, there is no way to return to the app.  I have to kill the app, and get back in.  
