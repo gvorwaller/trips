@@ -17,10 +17,10 @@ export const GET: RequestHandler = async ({ params, locals, url }) => {
 	const obj = await fetchObject(info.object_key);
 	const webStream = Readable.toWeb(obj.body) as unknown as ReadableStream;
 
-	const disposition = url.searchParams.has('download') ? 'attachment' : 'inline';
+	const isDownload = url.searchParams.has('download');
 	const headers: Record<string, string> = {
-		'Content-Type': info.mime_type,
-		'Content-Disposition': `${disposition}; filename="${info.original_name}"`,
+		'Content-Type': isDownload ? 'application/octet-stream' : info.mime_type,
+		'Content-Disposition': `${isDownload ? 'attachment' : 'inline'}; filename="${info.original_name}"`,
 		'Cache-Control': 'private, no-store'
 	};
 	if (obj.contentLength) headers['Content-Length'] = String(obj.contentLength);

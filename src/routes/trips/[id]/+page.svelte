@@ -830,40 +830,40 @@
 		<ul class="outline">
 			{#each data.reservations as r (r.id)}
 				<li>
-					<div class="line">
-						<span class="badge need">{r.reservation_type}</span>
-						<span class="grow">
-							<span class="ttl">{r.title}</span>
-							<div class="meta">
-								{#if r.confirmation_code}Conf: {r.confirmation_code} ·
-								{/if}
-								{#if r.status}{r.status} ·
-								{/if}
-								{#if r.start_at}{fmtDateTime(r.start_at)}{/if}
-								{#if r.end_at}
-									→ {fmtDateTime(r.end_at)}{/if}
-							</div>
-							{#if r.notes}
-								<details class="res-notes">
-									<summary>Show details</summary>
-									<pre class="res-notes-body">{r.notes}</pre>
-								</details>
+					<div class="res-row">
+						<div class="res-header">
+							<span class="badge need">{r.reservation_type}</span>
+							{#if !isViewer}
+								<button
+									type="button"
+									class="del"
+									title="delete"
+									onclick={() =>
+										(pendingDelete = {
+											action: 'res-delete',
+											fields: { id: r.id },
+											heading: 'Delete this reservation?',
+											body: `"${r.title}" will be permanently removed.`,
+											confirmLabel: 'Delete'
+										})}>✕</button
+								>
 							{/if}
-						</span>
-						{#if !isViewer}
-							<button
-								type="button"
-								class="del"
-								title="delete"
-								onclick={() =>
-									(pendingDelete = {
-										action: 'res-delete',
-										fields: { id: r.id },
-										heading: 'Delete this reservation?',
-										body: `"${r.title}" will be permanently removed.`,
-										confirmLabel: 'Delete'
-									})}>✕</button
-							>
+						</div>
+						<span class="ttl">{r.title}</span>
+						<div class="meta">
+							{#if r.confirmation_code}Conf: {r.confirmation_code} ·
+							{/if}
+							{#if r.status}{r.status} ·
+							{/if}
+							{#if r.start_at}{fmtDateTime(r.start_at)}{/if}
+							{#if r.end_at}
+								→ {fmtDateTime(r.end_at)}{/if}
+						</div>
+						{#if r.notes}
+							<details class="res-notes">
+								<summary>Show details</summary>
+								<pre class="res-notes-body">{r.notes}</pre>
+							</details>
 						{/if}
 					</div>
 					{#if !isViewer}
@@ -1549,6 +1549,16 @@
 			width: 100%;
 			padding: 4px 0 2px 54px;
 		}
+	}
+	/* ── Reservation card layout ── */
+	.res-row {
+		padding: 8px 0;
+	}
+	.res-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-bottom: 4px;
 	}
 	/* ── Reservation notes toggle ── */
 	.res-notes summary {
