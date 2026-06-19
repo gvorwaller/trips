@@ -3,6 +3,7 @@
 	import { invalidateAll } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { onMount, tick } from 'svelte';
+	import AttachmentDownloadButton from '$components/AttachmentDownloadButton.svelte';
 	import PinMap from '$components/PinMap.svelte';
 	import {
 		googleMapsLink,
@@ -1051,14 +1052,14 @@
 									{a.mime_type} · {fmtSize(a.size_bytes)}
 									<a
 										class="chip-link"
-										href="/trips/{data.trip.id}/attachments/{a.id}"
-										target="_blank"
-										rel="noopener">View</a
+										href="/trips/{data.trip.id}/attachments/{a.id}/view">View</a
 									>
-									<a
+									<AttachmentDownloadButton
 										class="chip-link"
-										href="/trips/{data.trip.id}/attachments/{a.id}?download"
-									>Download</a>
+										url={`/trips/${data.trip.id}/attachments/${a.id}`}
+										filename={a.original_name}
+										mimeType={a.mime_type}
+									/>
 								</div>
 							{/if}
 						</span>
@@ -1271,6 +1272,7 @@
 	.chip-link {
 		font-size: 0.78rem;
 		padding: 3px 9px;
+		border: 0;
 		border-radius: 999px;
 		background: var(--accent-soft);
 		color: var(--accent);

@@ -128,14 +128,15 @@ export interface DownloadInfo {
 /** Resolve an attachment for download, enforcing ownership via the trips join. */
 export async function getAttachmentForDownload(
 	ownerId: number,
+	tripId: number,
 	attachmentId: number
 ): Promise<DownloadInfo | null> {
 	const res = await query<DownloadInfo>(
 		`SELECT a.object_key, a.mime_type, a.original_name
 		   FROM attachments a
 		   JOIN trips t ON t.id = a.trip_id
-		  WHERE a.id = $1 AND t.owner_id = $2 AND a.status = 'active' AND a.kind = 'file'`,
-		[attachmentId, ownerId]
+		  WHERE a.id = $1 AND t.id = $2 AND t.owner_id = $3 AND a.status = 'active' AND a.kind = 'file'`,
+		[attachmentId, tripId, ownerId]
 	);
 	return res.rows[0] ?? null;
 }

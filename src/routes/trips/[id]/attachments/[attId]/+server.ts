@@ -8,10 +8,12 @@ import { getAttachmentForDownload, fetchObject } from '$server/attachments';
 // download but cannot reach another owner's files. The hook allows GET for viewers.
 export const GET: RequestHandler = async ({ params, locals, url }) => {
 	if (!locals.ownerId) throw error(500, 'No owner configured');
+	const tripId = Number(params.id);
 	const attId = Number(params.attId);
+	if (!Number.isInteger(tripId) || tripId <= 0) throw error(404, 'Not found');
 	if (!Number.isInteger(attId) || attId <= 0) throw error(404, 'Not found');
 
-	const info = await getAttachmentForDownload(locals.ownerId, attId);
+	const info = await getAttachmentForDownload(locals.ownerId, tripId, attId);
 	if (!info) throw error(404, 'Attachment not found');
 
 	const obj = await fetchObject(info.object_key);
