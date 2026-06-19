@@ -2,7 +2,7 @@
 	import { enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
 	import { browser } from '$app/environment';
-	import { onMount, tick } from 'svelte';
+	import { flushSync, onMount } from 'svelte';
 	import AttachmentDownloadButton from '$components/AttachmentDownloadButton.svelte';
 	import PinMap from '$components/PinMap.svelte';
 	import {
@@ -355,27 +355,30 @@
 	// Print a one-page trip sheet (td-a2d073). Collapsed branches are removed from
 	// the DOM, so expand everything first (in memory only — don't persist to
 	// localStorage), render, print, then restore the user's fold state.
-	async function printSheet() {
+	function printSheet() {
 		const savedItin = itinCollapsed;
 		const savedPack = packCollapsed;
 		const savedSections = sectionsCollapsed;
 		itinCollapsed = new Set();
 		packCollapsed = new Set();
 		sectionsCollapsed = new Set();
-		await tick();
-		window.print();
-		itinCollapsed = savedItin;
-		packCollapsed = savedPack;
-		sectionsCollapsed = savedSections;
+		flushSync();
+		try {
+			window.print();
+		} finally {
+			itinCollapsed = savedItin;
+			packCollapsed = savedPack;
+			sectionsCollapsed = savedSections;
+		}
 	}
 
-	async function printPacking() {
+	function printPacking() {
 		const savedSections = sectionsCollapsed;
 		const nextSections = new Set(sectionsCollapsed);
 		nextSections.delete('packing');
 		sectionsCollapsed = nextSections;
 		document.body.classList.add('print-packing-only');
-		await tick();
+		flushSync();
 		try {
 			window.print();
 		} finally {
