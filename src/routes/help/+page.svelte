@@ -66,6 +66,22 @@
 		set is saved and used everywhere (printing, viewer mode).
 	</p>
 
+	<h2>Expenses</h2>
+	<p>
+		Track rough trip costs in the <strong>Expenses</strong> section. Each expense has a date,
+		description, amount, and optional category (lodging, food, transport, activities, other).
+		The running total is always visible in the section header, even when collapsed.
+	</p>
+	<p>
+		<strong>Extract from text or document</strong> — paste a bank statement or choose an uploaded
+		screenshot, and the app will pull out individual transactions for you to review before adding.
+		You can deselect items that aren't trip-related and edit categories before saving.
+	</p>
+	<p>
+		You can optionally link an expense to an uploaded document (receipt, confirmation) via the
+		"Link document" dropdown.
+	</p>
+
 	<h2>Collapsing</h2>
 	<p>
 		Any row with children shows a <strong>▾ / ▸</strong> caret — tap it to fold or unfold that

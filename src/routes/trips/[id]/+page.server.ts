@@ -43,6 +43,22 @@ import {
 } from '$server/reservations';
 import { extractFromText, extractFromDocument } from '$server/reservation-extract';
 import {
+	listExpenses,
+	createExpense,
+	updateExpense,
+	deleteExpense,
+	moveExpense,
+	bulkCreateExpenses,
+	parseExpenseForm,
+	parseAmount,
+	type ExpenseInput,
+	EXPENSE_CATEGORIES
+} from '$server/expenses';
+import {
+	extractExpensesFromText,
+	extractExpensesFromDocument
+} from '$server/expense-extract';
+import {
 	listAttachmentsForTrip,
 	uploadAttachment,
 	createTextDocument,
@@ -82,14 +98,16 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	const trip = await getTrip(ownerId, tripId);
 	if (!trip) throw error(404, 'Trip not found');
 
-	const [itinerary, lists, itemsByList, templates, reservations, attachments] = await Promise.all([
-		listItinerary(tripId),
-		listPackingLists(tripId),
-		getPackingItemsForTrip(tripId),
-		listTemplates(ownerId),
-		listReservations(tripId),
-		listAttachmentsForTrip(tripId)
-	]);
+	const [itinerary, lists, itemsByList, templates, reservations, attachments, expenses] =
+		await Promise.all([
+			listItinerary(tripId),
+			listPackingLists(tripId),
+			getPackingItemsForTrip(tripId),
+			listTemplates(ownerId),
+			listReservations(tripId),
+			listAttachmentsForTrip(tripId),
+			listExpenses(tripId)
+		]);
 
 	const itineraryRows = flattenTree(itinerary);
 	const packing = lists.map((list) => {
@@ -102,7 +120,7 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		const checked = leaves.filter((i) => i.checked).length;
 		return { list, rows: flattenTree(items), total: leaves.length, checked };
 	});
-	return { trip, itineraryRows, packing, templates, reservations, attachments };
+	return { trip, itineraryRows, packing, templates, reservations, attachments, expenses };
 };
 
 /** Resolve trip and assert ownership for an action; returns {ownerId, tripId}. */
@@ -404,6 +422,94 @@ export const actions: Actions = {
 		if (dir !== 'up' && dir !== 'down') return fail(400, { error: 'Invalid direction' });
 		await moveReservation(tripId, parseId(form.get('id')), dir);
 		return { ok: true };
+	},
+
+	// ── Expenses ──────────────────────────────────────────
+	'exp-add': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const { input, error: e } = parseExpenseForm(form);
+		if (!input) return fail(400, { error: e });
+		await createExpense(tripId, input);
+		return { ok: true };
+	},
+
+	'exp-edit': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const { input, error: e } = parseExpenseForm(form);
+		if (!input) return fail(400, { error: e });
+		await updateExpense(tripId, parseId(form.get('id')), input);
+		return { ok: true };
+	},
+
+	'exp-delete': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		await deleteExpense(tripId, parseId(form.get('id')));
+		return { ok: true };
+	},
+
+	'exp-move': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const dir = form.get('direction')?.toString();
+		if (dir !== 'up' && dir !== 'down') return fail(400, { error: 'Invalid direction' });
+		await moveExpense(tripId, parseId(form.get('id')), dir);
+		return { ok: true };
+	},
+
+	'exp-extract': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const candidates =
+			form.get('source') === 'document'
+				? await extractExpensesFromDocument(ownerId, parseId(form.get('attachment_id')))
+				: await extractExpensesFromText((form.get('text') ?? '').toString());
+		if (!candidates) return fail(502, { error: 'Could not extract expenses. Try again or add manually.' });
+		return { ok: true, candidates };
+	},
+
+	'exp-bulk-add': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const raw = form.get('expenses')?.toString();
+		if (!raw) return fail(400, { error: 'No expenses provided.' });
+		let items: Array<{
+			expense_date?: string | null;
+			description?: string;
+			amount_cents?: number;
+			category?: string;
+			attachment_id?: number | null;
+			notes?: string | null;
+		}>;
+		try {
+			items = JSON.parse(raw);
+		} catch {
+			return fail(400, { error: 'Invalid data.' });
+		}
+		if (!Array.isArray(items) || items.length === 0) return fail(400, { error: 'No expenses.' });
+		const inputs: ExpenseInput[] = items
+			.filter((i) => i.description && typeof i.amount_cents === 'number')
+			.map((i) => ({
+				expense_date: i.expense_date?.toString().trim() || null,
+				description: (i.description ?? '').toString().slice(0, 500),
+				amount_cents: Math.max(0, Math.round(i.amount_cents ?? 0)),
+				category: (EXPENSE_CATEGORIES as readonly string[]).includes(i.category ?? '')
+					? (i.category as ExpenseInput['category'])
+					: 'other',
+				attachment_id: i.attachment_id ?? null,
+				notes: i.notes?.toString().trim() || null
+			}));
+		if (inputs.length === 0) return fail(400, { error: 'No valid expenses.' });
+		await bulkCreateExpenses(tripId, inputs);
+		return { ok: true, added: inputs.length };
 	},
 
 	// ── Attachments ────────────────────────────────────────

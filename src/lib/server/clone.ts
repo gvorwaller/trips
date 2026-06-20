@@ -89,6 +89,20 @@ export async function duplicateTrip(ownerId: number, tripId: number): Promise<nu
 			}
 		}
 
+		// Expenses (flat rows, no tree)
+		const expenses = await client.query(
+			`SELECT expense_date, description, amount_cents, category, notes, sort_order
+			   FROM expenses WHERE trip_id = $1`,
+			[tripId]
+		);
+		for (const e of expenses.rows) {
+			await client.query(
+				`INSERT INTO expenses (trip_id, expense_date, description, amount_cents, category, notes, sort_order)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+				[newTripId, e.expense_date, e.description, e.amount_cents, e.category, e.notes, e.sort_order]
+			);
+		}
+
 		return newTripId;
 	});
 }

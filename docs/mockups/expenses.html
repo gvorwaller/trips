@@ -1,0 +1,608 @@
+<!doctype html>
+<!--
+  Expenses section UI/UX mockup — visual reference for td-627abc.
+  Mobile-first, static HTML + minimal JS for interaction previews.
+  Open directly in a browser to review layout and flow.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Expenses — mockup</title>
+  <link rel="stylesheet" href="mockup.css" />
+  <style>
+    /* ── Base resets from the app ── */
+    .outline { list-style: none; margin: 0; padding: 0; }
+    .outline li { border-top: 1px solid var(--border); }
+    .muted { color: var(--muted); font-size: 0.9rem; }
+    .badge {
+      display: inline-block; font-size: 0.7rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.03em;
+      padding: 2px 8px; border-radius: 4px;
+      background: var(--need-bg); color: var(--need-text);
+    }
+    .badge.cat-lodging { background: #dbeafe; color: #1e3a5f; }
+    .badge.cat-food { background: #fef3c7; color: #78350f; }
+    .badge.cat-transport { background: #e0e7ff; color: #3730a3; }
+    .badge.cat-activities { background: #d1fae5; color: #065f46; }
+    .badge.cat-other { background: var(--border); color: var(--muted); }
+
+    /* ── Section toggle (matches app pattern) ── */
+    .section-toggle {
+      display: flex; align-items: center; gap: 6px;
+      background: none; border: none; padding: 0;
+      cursor: pointer; width: 100%; text-align: left;
+    }
+    .section-toggle h2 { margin: 0; flex: 1; }
+    .section-caret {
+      font-size: 0.9rem; color: var(--muted);
+      flex-shrink: 0; width: 18px;
+    }
+    .expense-total {
+      font-size: 0.95rem; font-weight: 600;
+      color: var(--accent); white-space: nowrap;
+    }
+
+    /* ── Expense rows ── */
+    .exp-row {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 10px 0; flex-wrap: wrap;
+    }
+    .exp-main { flex: 1; min-width: 0; }
+    .exp-amount {
+      font-weight: 600; font-size: 1rem;
+      white-space: nowrap; text-align: right;
+      min-width: 70px;
+    }
+    .exp-desc { font-weight: 500; }
+    .exp-meta { font-size: 0.82rem; color: var(--muted); margin-top: 2px; }
+    .exp-doc-link {
+      font-size: 0.78rem; color: var(--link);
+      text-decoration: none; margin-top: 2px; display: inline-block;
+    }
+    .exp-controls {
+      display: flex; gap: 2px;
+    }
+    .exp-controls button {
+      border: 1px solid var(--border); background: var(--card);
+      border-radius: 6px; min-width: 30px; min-height: 32px;
+      color: var(--muted); cursor: pointer; font: inherit;
+    }
+    .exp-controls button.del { color: var(--danger); }
+
+    /* ── Total row ── */
+    .exp-total-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 12px 0 4px; font-weight: 600;
+      border-top: 2px solid var(--border);
+    }
+    .exp-total-row .exp-amount { font-size: 1.1rem; }
+
+    /* ── Category subtotals ── */
+    .cat-subtotals {
+      display: flex; flex-wrap: wrap; gap: 8px;
+      padding: 6px 0 8px; font-size: 0.82rem; color: var(--muted);
+    }
+    .cat-sub { display: flex; align-items: center; gap: 4px; }
+
+    /* ── Add / Extract forms ── */
+    details.add-section { margin-top: 12px; }
+    details.add-section > summary {
+      cursor: pointer; color: var(--link); font-size: 0.9rem;
+      padding: 4px 0;
+    }
+    .add-panel { margin-top: 8px; }
+    .extract-block {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px; margin-bottom: 12px;
+    }
+    .extract-block h3 {
+      font-size: 0.9rem; margin: 0 0 8px; color: var(--accent);
+    }
+    .extract-block textarea {
+      width: 100%; font: inherit; font-size: 0.9rem;
+      padding: 8px; border: 1px solid var(--border);
+      border-radius: 6px; resize: vertical;
+    }
+    .extract-block select {
+      width: 100%; font: inherit; padding: 8px;
+      border: 1px solid var(--border); border-radius: 6px;
+    }
+
+    /* ── Candidate review table ── */
+    .candidates {
+      background: var(--accent-soft); border: 1px solid var(--accent);
+      border-radius: 8px; padding: 12px; margin: 12px 0;
+    }
+    .candidates h3 {
+      font-size: 0.9rem; margin: 0 0 8px; color: var(--accent);
+    }
+    .cand-row {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 0; border-top: 1px solid rgba(0,0,0,0.08);
+      flex-wrap: wrap;
+    }
+    .cand-row:first-of-type { border-top: none; }
+    .cand-row input[type="checkbox"] {
+      width: 20px; height: 20px; flex-shrink: 0;
+    }
+    .cand-date {
+      font-size: 0.82rem; color: var(--muted);
+      width: 80px; flex-shrink: 0;
+    }
+    .cand-desc { flex: 1; min-width: 0; font-size: 0.9rem; }
+    .cand-amount {
+      font-weight: 600; font-size: 0.9rem;
+      white-space: nowrap; min-width: 60px; text-align: right;
+    }
+    .cand-cat {
+      font-size: 0.8rem; padding: 4px;
+      border: 1px solid var(--border); border-radius: 4px;
+    }
+    .cand-actions {
+      display: flex; gap: 6px; flex-wrap: wrap;
+      margin-top: 10px; padding-top: 8px;
+      border-top: 1px solid rgba(0,0,0,0.08);
+    }
+
+    /* ── Manual entry form ── */
+    .manual-form {
+      display: flex; flex-direction: column; gap: 8px;
+      margin-top: 12px; padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .manual-form h3 {
+      font-size: 0.9rem; margin: 0; color: var(--accent);
+    }
+    .form-row {
+      display: flex; gap: 8px;
+    }
+    .form-row input, .form-row select {
+      font: inherit; padding: 8px;
+      border: 1px solid var(--border); border-radius: 6px;
+    }
+    .form-row input { flex: 1; min-width: 0; }
+    .form-row select { min-width: 100px; }
+    .form-row .amount-input { max-width: 110px; }
+    .form-row .date-input { max-width: 150px; }
+    .manual-form textarea {
+      width: 100%; font: inherit; font-size: 0.9rem;
+      padding: 8px; border: 1px solid var(--border); border-radius: 6px;
+    }
+
+    /* ── Edit form (inline details) ── */
+    details.edit > summary {
+      cursor: pointer; color: var(--link); font-size: 0.82rem;
+      margin-top: 4px;
+    }
+    .edit-form {
+      display: flex; flex-direction: column; gap: 6px;
+      margin-top: 8px; padding: 8px;
+      background: var(--bg); border-radius: 6px;
+    }
+    .edit-form input, .edit-form select, .edit-form textarea {
+      font: inherit; padding: 8px;
+      border: 1px solid var(--border); border-radius: 6px;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 639px) {
+      .exp-controls {
+        width: 100%; padding-top: 4px;
+      }
+      .cand-cat { width: 100%; }
+    }
+
+    /* ── Mockup annotation ── */
+    .mockup-note {
+      background: #ffffcc; border: 1px dashed #cca; border-radius: 6px;
+      padding: 8px 12px; margin: 12px 0; font-size: 0.82rem;
+      color: #665500; line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <header class="top-nav">
+    <strong class="brand">trips</strong>
+    <span class="spacer"></span>
+    <span class="user">Provence 2026</span>
+  </header>
+
+  <main class="page">
+
+    <!-- ═══════════════════════════════════════════════════════
+         STATE 1: Expenses section — populated, expanded
+         ═══════════════════════════════════════════════════════ -->
+    <section class="card" style="margin-bottom: 24px">
+      <div class="mockup-note">
+        <strong>State 1:</strong> Expenses section expanded with several entries.
+        Total shows in section header (visible even when collapsed).
+        Category badges color-coded. Reorder + delete controls on right.
+      </div>
+
+      <button class="section-toggle" type="button">
+        <span class="section-caret">▾</span>
+        <h2>Expenses</h2>
+        <span class="expense-total">$2,847.50</span>
+      </button>
+
+      <!-- Expense list -->
+      <ul class="outline">
+        <li>
+          <div class="exp-row">
+            <div class="exp-main">
+              <span class="badge cat-lodging">lodging</span>
+              <div class="exp-desc">Hotel & Spa de l'Abbaye</div>
+              <div class="exp-meta">Jul 28 · 4 nights</div>
+              <a class="exp-doc-link" href="#">📎 Hotel booking confirmation.pdf</a>
+            </div>
+            <span class="exp-amount">$1,240.00</span>
+            <span class="exp-controls">
+              <button title="move up">↑</button>
+              <button title="move down">↓</button>
+              <button class="del" title="delete">✕</button>
+            </span>
+          </div>
+          <details class="edit">
+            <summary>edit</summary>
+            <form class="edit-form">
+              <div class="form-row">
+                <input class="date-input" type="date" value="2026-07-28" />
+                <select>
+                  <option selected>lodging</option>
+                  <option>food</option>
+                  <option>transport</option>
+                  <option>activities</option>
+                  <option>other</option>
+                </select>
+              </div>
+              <input value="Hotel & Spa de l'Abbaye" placeholder="Description" />
+              <div class="form-row">
+                <input class="amount-input" value="1240.00" placeholder="$0.00" inputmode="decimal" />
+                <select>
+                  <option value="">Link document (optional)</option>
+                  <option selected>Hotel booking confirmation.pdf</option>
+                  <option>Flight itinerary.pdf</option>
+                  <option>Jul bank statement</option>
+                </select>
+              </div>
+              <textarea rows="1" placeholder="Notes (optional)">4 nights</textarea>
+              <button class="btn small primary" type="button">Save</button>
+            </form>
+          </details>
+        </li>
+
+        <li>
+          <div class="exp-row">
+            <div class="exp-main">
+              <span class="badge cat-transport">transport</span>
+              <div class="exp-desc">Delta Air Lines — CDG round trip</div>
+              <div class="exp-meta">Jul 12</div>
+              <a class="exp-doc-link" href="#">📎 Flight itinerary.pdf</a>
+            </div>
+            <span class="exp-amount">$892.00</span>
+            <span class="exp-controls">
+              <button title="move up">↑</button>
+              <button title="move down">↓</button>
+              <button class="del" title="delete">✕</button>
+            </span>
+          </div>
+        </li>
+
+        <li>
+          <div class="exp-row">
+            <div class="exp-main">
+              <span class="badge cat-food">food</span>
+              <div class="exp-desc">Le Petit Bistrot</div>
+              <div class="exp-meta">Jul 29</div>
+            </div>
+            <span class="exp-amount">$127.50</span>
+            <span class="exp-controls">
+              <button title="move up">↑</button>
+              <button title="move down">↓</button>
+              <button class="del" title="delete">✕</button>
+            </span>
+          </div>
+        </li>
+
+        <li>
+          <div class="exp-row">
+            <div class="exp-main">
+              <span class="badge cat-activities">activities</span>
+              <div class="exp-desc">Lavender Fields guided tour</div>
+              <div class="exp-meta">Jul 30</div>
+            </div>
+            <span class="exp-amount">$180.00</span>
+            <span class="exp-controls">
+              <button title="move up">↑</button>
+              <button title="move down">↓</button>
+              <button class="del" title="delete">✕</button>
+            </span>
+          </div>
+        </li>
+
+        <li>
+          <div class="exp-row">
+            <div class="exp-main">
+              <span class="badge cat-food">food</span>
+              <div class="exp-desc">Carrefour Market</div>
+              <div class="exp-meta">Jul 29</div>
+            </div>
+            <span class="exp-amount">$48.00</span>
+            <span class="exp-controls">
+              <button title="move up">↑</button>
+              <button title="move down">↓</button>
+              <button class="del" title="delete">✕</button>
+            </span>
+          </div>
+        </li>
+
+        <li>
+          <div class="exp-row">
+            <div class="exp-main">
+              <span class="badge cat-other">other</span>
+              <div class="exp-desc">Travel insurance — Allianz</div>
+              <div class="exp-meta">Jul 15</div>
+            </div>
+            <span class="exp-amount">$360.00</span>
+            <span class="exp-controls">
+              <button title="move up">↑</button>
+              <button title="move down">↓</button>
+              <button class="del" title="delete">✕</button>
+            </span>
+          </div>
+        </li>
+      </ul>
+
+      <!-- Category subtotals -->
+      <div class="cat-subtotals">
+        <span class="cat-sub"><span class="badge cat-lodging">lodging</span> $1,240</span>
+        <span class="cat-sub"><span class="badge cat-transport">transport</span> $892</span>
+        <span class="cat-sub"><span class="badge cat-food">food</span> $176</span>
+        <span class="cat-sub"><span class="badge cat-activities">activities</span> $180</span>
+        <span class="cat-sub"><span class="badge cat-other">other</span> $360</span>
+      </div>
+
+      <!-- Total -->
+      <div class="exp-total-row">
+        <span>Total</span>
+        <span class="exp-amount">$2,847.50</span>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════
+         STATE 2: Expenses section — collapsed (total still visible)
+         ═══════════════════════════════════════════════════════ -->
+    <section class="card" style="margin-bottom: 24px">
+      <div class="mockup-note">
+        <strong>State 2:</strong> Collapsed state — total remains visible in the header.
+      </div>
+
+      <button class="section-toggle" type="button">
+        <span class="section-caret">▸</span>
+        <h2>Expenses</h2>
+        <span class="expense-total">$2,847.50</span>
+      </button>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════
+         STATE 3: Add expense — manual entry form
+         ═══════════════════════════════════════════════════════ -->
+    <section class="card" style="margin-bottom: 24px">
+      <div class="mockup-note">
+        <strong>State 3:</strong> "Add expense" expanded — shows extraction options at top,
+        manual entry form below. Extract from pasted text (bank statement) or from
+        an already-uploaded document.
+      </div>
+
+      <button class="section-toggle" type="button">
+        <span class="section-caret">▾</span>
+        <h2>Expenses</h2>
+        <span class="expense-total">$0.00</span>
+      </button>
+
+      <p class="muted">No expenses yet.</p>
+
+      <details class="add-section" open>
+        <summary>Add expense</summary>
+        <div class="add-panel">
+
+          <!-- Extract from text -->
+          <div class="extract-block">
+            <h3>Extract from text</h3>
+            <textarea rows="4" placeholder="Paste bank statement text, credit card transactions, or a receipt...">07/28 HOTEL ABBAYE PROVENCE    $1,240.00
+07/29 LE PETIT BISTROT          $127.50
+07/29 CARREFOUR MARKET GORDES   $48.00
+07/30 LAVENDER TOURS SAULT      $180.00</textarea>
+            <div style="display: flex; gap: 8px; margin-top: 8px; align-items: center">
+              <button class="btn small primary" type="button">Extract expenses</button>
+              <label style="font-size: 0.82rem; color: var(--muted)">
+                <input type="checkbox" checked /> Also save text as document
+              </label>
+            </div>
+          </div>
+
+          <!-- Extract from document -->
+          <div class="extract-block">
+            <h3>Extract from uploaded document</h3>
+            <select>
+              <option value="">Choose a document…</option>
+              <option>Jul bank statement (screenshot).png</option>
+              <option>Hotel booking confirmation.pdf</option>
+              <option>Flight itinerary.pdf</option>
+            </select>
+            <div style="margin-top: 8px">
+              <button class="btn small primary" type="button">Extract expenses</button>
+            </div>
+          </div>
+
+          <!-- Manual entry -->
+          <div class="manual-form">
+            <h3>Or add manually</h3>
+            <div class="form-row">
+              <input class="date-input" type="date" placeholder="Date" />
+              <select>
+                <option value="other">other</option>
+                <option value="lodging">lodging</option>
+                <option value="food">food</option>
+                <option value="transport">transport</option>
+                <option value="activities">activities</option>
+              </select>
+            </div>
+            <input placeholder="Description (required)" />
+            <div class="form-row">
+              <input class="amount-input" placeholder="$0.00" inputmode="decimal" />
+              <select>
+                <option value="">Link document (optional)</option>
+                <option>Hotel booking confirmation.pdf</option>
+                <option>Flight itinerary.pdf</option>
+              </select>
+            </div>
+            <textarea rows="1" placeholder="Notes (optional)"></textarea>
+            <button class="btn small primary" type="button">Add expense</button>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════
+         STATE 4: Extraction results — candidate review
+         ═══════════════════════════════════════════════════════ -->
+    <section class="card" style="margin-bottom: 24px">
+      <div class="mockup-note">
+        <strong>State 4:</strong> After clicking "Extract expenses" — candidates appear
+        for review. Each has a checkbox (all selected by default), editable category,
+        and the user can deselect non-trip items before adding.
+      </div>
+
+      <button class="section-toggle" type="button">
+        <span class="section-caret">▾</span>
+        <h2>Expenses</h2>
+        <span class="expense-total">$0.00</span>
+      </button>
+
+      <div class="candidates">
+        <h3>4 transactions found — review and add:</h3>
+
+        <div class="cand-row">
+          <input type="checkbox" checked />
+          <span class="cand-date">Jul 28</span>
+          <span class="cand-desc">Hotel & Spa de l'Abbaye</span>
+          <span class="cand-amount">$1,240.00</span>
+          <select class="cand-cat">
+            <option selected>lodging</option>
+            <option>food</option>
+            <option>transport</option>
+            <option>activities</option>
+            <option>other</option>
+          </select>
+        </div>
+
+        <div class="cand-row">
+          <input type="checkbox" checked />
+          <span class="cand-date">Jul 29</span>
+          <span class="cand-desc">Le Petit Bistrot</span>
+          <span class="cand-amount">$127.50</span>
+          <select class="cand-cat">
+            <option>lodging</option>
+            <option selected>food</option>
+            <option>transport</option>
+            <option>activities</option>
+            <option>other</option>
+          </select>
+        </div>
+
+        <div class="cand-row">
+          <input type="checkbox" checked />
+          <span class="cand-date">Jul 29</span>
+          <span class="cand-desc">Carrefour Market</span>
+          <span class="cand-amount">$48.00</span>
+          <select class="cand-cat">
+            <option>lodging</option>
+            <option selected>food</option>
+            <option>transport</option>
+            <option>activities</option>
+            <option>other</option>
+          </select>
+        </div>
+
+        <div class="cand-row">
+          <input type="checkbox" checked />
+          <span class="cand-date">Jul 30</span>
+          <span class="cand-desc">Lavender Tours</span>
+          <span class="cand-amount">$180.00</span>
+          <select class="cand-cat">
+            <option>lodging</option>
+            <option>food</option>
+            <option>transport</option>
+            <option selected>activities</option>
+            <option>other</option>
+          </select>
+        </div>
+
+        <div class="cand-actions">
+          <button class="btn small" type="button">Select all</button>
+          <button class="btn small" type="button">Select none</button>
+          <button class="btn small primary" type="button">Add 4 expenses</button>
+          <button class="btn small" type="button">Clear</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════
+         STATE 5: Viewer mode (read-only)
+         ═══════════════════════════════════════════════════════ -->
+    <section class="card" style="margin-bottom: 24px">
+      <div class="mockup-note">
+        <strong>State 5:</strong> Viewer mode — no add/edit/delete/reorder controls.
+        Just the expense list with total.
+      </div>
+
+      <button class="section-toggle" type="button">
+        <span class="section-caret">▾</span>
+        <h2>Expenses</h2>
+        <span class="expense-total">$2,847.50</span>
+      </button>
+
+      <ul class="outline">
+        <li>
+          <div class="exp-row">
+            <div class="exp-main">
+              <span class="badge cat-lodging">lodging</span>
+              <div class="exp-desc">Hotel & Spa de l'Abbaye</div>
+              <div class="exp-meta">Jul 28 · 4 nights</div>
+            </div>
+            <span class="exp-amount">$1,240.00</span>
+          </div>
+        </li>
+        <li>
+          <div class="exp-row">
+            <div class="exp-main">
+              <span class="badge cat-transport">transport</span>
+              <div class="exp-desc">Delta Air Lines — CDG round trip</div>
+              <div class="exp-meta">Jul 12</div>
+            </div>
+            <span class="exp-amount">$892.00</span>
+          </div>
+        </li>
+        <li>
+          <div class="exp-row">
+            <div class="exp-main">
+              <span class="badge cat-food">food</span>
+              <div class="exp-desc">Le Petit Bistrot</div>
+              <div class="exp-meta">Jul 29</div>
+            </div>
+            <span class="exp-amount">$127.50</span>
+          </div>
+        </li>
+      </ul>
+
+      <div class="exp-total-row">
+        <span>Total</span>
+        <span class="exp-amount">$2,847.50</span>
+      </div>
+    </section>
+
+  </main>
+</body>
+</html>

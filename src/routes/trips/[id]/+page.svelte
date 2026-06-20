@@ -118,6 +118,75 @@
 		};
 	}
 
+	// ── Expense state ──
+	const expenseTotal = $derived(
+		data.expenses.reduce((sum: number, e: { amount_cents: number }) => sum + e.amount_cents, 0)
+	);
+	function fmtAmount(cents: number): string {
+		return '$' + (cents / 100).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+	}
+	type ExpDraft = {
+		expense_date: string;
+		description: string;
+		amount: string;
+		category: string;
+		attachment_id: string;
+		notes: string;
+	};
+	const emptyExpDraft = (): ExpDraft => ({
+		expense_date: '',
+		description: '',
+		amount: '',
+		category: 'other',
+		attachment_id: '',
+		notes: ''
+	});
+	let expDraft = $state<ExpDraft>(emptyExpDraft());
+	let expExtractText = $state('');
+	let expExtractDocId = $state('');
+	let expExtracting = $state(false);
+	let expExtractMsg = $state('');
+	let expSaveTextAsDoc = $state(false);
+	interface ExpCandidate {
+		expense_date: string | null;
+		description: string;
+		amount: number;
+		category: string | null;
+		notes: string | null;
+		selected: boolean;
+	}
+	let expCandidates = $state<ExpCandidate[]>([]);
+
+	async function addSelectedExpenses() {
+		const selected = expCandidates
+			.filter((c) => c.selected)
+			.map((c) => ({
+				expense_date: c.expense_date,
+				description: c.description,
+				amount_cents: Math.round(c.amount * 100),
+				category: c.category ?? 'other',
+				attachment_id: null as number | null,
+				notes: c.notes
+			}));
+		if (selected.length === 0) return;
+		// Optionally save the pasted text as a text document first
+		if (expSaveTextAsDoc && expExtractText.trim()) {
+			const docFd = new FormData();
+			docFd.set('title', 'Expense statement');
+			docFd.set('text', expExtractText);
+			await fetch('?/doc-text-add', { method: 'POST', body: docFd });
+		}
+		const fd = new FormData();
+		fd.set('expenses', JSON.stringify(selected));
+		await fetch('?/exp-bulk-add', { method: 'POST', body: fd });
+		expCandidates = [];
+		expExtractMsg = '';
+		expExtractText = '';
+		expExtractDocId = '';
+		expSaveTextAsDoc = false;
+		invalidateAll();
+	}
+
 	// Single shared confirm-delete modal. Every ✕ / Delete control opens this
 	// instead of submitting immediately, so no deletion (and no parent_id
 	// ON DELETE CASCADE wipe of children) happens without confirmation. (td-02acd0)
@@ -1144,6 +1213,276 @@
 	{/if}
 </div>
 
+<!-- ── EXPENSES ──────────────────────────────────────── -->
+<div class="card">
+	<button class="section-toggle" type="button" onclick={() => toggleSection('expenses')}>
+		<span class="section-caret">{sectionsCollapsed.has('expenses') ? '▸' : '▾'}</span>
+		<h2>Expenses</h2>
+		<span class="expense-total">{fmtAmount(expenseTotal)}</span>
+	</button>
+	{#if !sectionsCollapsed.has('expenses')}
+	{#if data.expenses.length === 0}
+		<p class="muted">No expenses yet.</p>
+	{:else}
+		<ul class="outline">
+			{#each data.expenses as e (e.id)}
+				<li>
+					<div class="exp-row">
+						<div class="exp-main">
+							<span class="badge need">{e.category}</span>
+							<div class="exp-desc">{e.description}</div>
+							<div class="meta">
+								{#if e.expense_date}{new Date(e.expense_date + 'T00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}{/if}
+								{#if e.notes} · {e.notes}{/if}
+							</div>
+							{#if e.attachment_id}
+								{@const att = data.attachments.find(a => a.id === e.attachment_id)}
+								{#if att}
+									<a class="exp-doc-link" href="/trips/{data.trip.id}/attachments/{att.id}/view">
+										{att.display_name || att.original_name}
+									</a>
+								{/if}
+							{/if}
+						</div>
+						<span class="exp-amount">{fmtAmount(e.amount_cents)}</span>
+						{#if !isViewer}
+							<span class="exp-controls">
+								{#each ['up', 'down'] as dir}
+									<form method="POST" action="?/exp-move" use:enhance>
+										<input type="hidden" name="id" value={e.id} />
+										<input type="hidden" name="direction" value={dir} />
+										<button type="submit" title="move {dir}">{dir === 'up' ? '↑' : '↓'}</button>
+									</form>
+								{/each}
+								<button
+									type="button"
+									class="del"
+									title="delete"
+									onclick={() =>
+										(pendingDelete = {
+											action: 'exp-delete',
+											fields: { id: e.id },
+											heading: 'Delete this expense?',
+											body: `"${e.description}" will be permanently removed.`,
+											confirmLabel: 'Delete'
+										})}>✕</button
+								>
+							</span>
+						{/if}
+					</div>
+					{#if !isViewer}
+						<details class="edit">
+							<summary>edit</summary>
+							<form method="POST" action="?/exp-edit" use:enhance class="edit-form">
+								<input type="hidden" name="id" value={e.id} />
+								<div class="form-row">
+									<input type="date" name="expense_date" value={e.expense_date ?? ''} />
+									<select name="category" aria-label="category">
+										{#each ['lodging', 'food', 'transport', 'activities', 'other'] as c (c)}
+											<option value={c} selected={e.category === c}>{c}</option>
+										{/each}
+									</select>
+								</div>
+								<input name="description" value={e.description} placeholder="Description" required />
+								<div class="form-row">
+									<input name="amount" value={(e.amount_cents / 100).toFixed(2)} placeholder="$0.00" inputmode="decimal" />
+									<select name="attachment_id" aria-label="linked document">
+										<option value="">Link document (optional)</option>
+										{#each data.attachments as a (a.id)}
+											<option value={a.id} selected={e.attachment_id === a.id}>{a.display_name || a.original_name}</option>
+										{/each}
+									</select>
+								</div>
+								<textarea name="notes" rows="1" placeholder="Notes (optional)">{e.notes ?? ''}</textarea>
+								<button class="btn small primary" type="submit">Save</button>
+							</form>
+						</details>
+					{/if}
+				</li>
+			{/each}
+		</ul>
+
+		{@const catTotals = data.expenses.reduce((acc: Record<string, number>, e: { category: string; amount_cents: number }) => {
+			acc[e.category] = (acc[e.category] ?? 0) + e.amount_cents;
+			return acc;
+		}, {} as Record<string, number>)}
+		{#if Object.keys(catTotals).length > 1}
+			<div class="cat-subtotals">
+				{#each Object.entries(catTotals) as [cat, cents]}
+					<span class="cat-sub"><span class="badge need">{cat}</span> {fmtAmount(cents as number)}</span>
+				{/each}
+			</div>
+		{/if}
+
+		<div class="exp-total-row">
+			<span>Total</span>
+			<span class="exp-amount">{fmtAmount(expenseTotal)}</span>
+		</div>
+	{/if}
+
+	{#if !isViewer}
+		<details class="paste">
+			<summary>Add expense</summary>
+
+			<div class="extract">
+				<p class="extract-head">Extract from a bank statement or receipt</p>
+				<form
+					method="POST"
+					action="?/exp-extract"
+					class="extract-form"
+					use:enhance={() => {
+						expExtracting = true;
+						expExtractMsg = '';
+						return async ({ result }) => {
+							expExtracting = false;
+							if (result.type === 'success' && result.data?.ok) {
+								const raw = (result.data as { candidates?: Array<{ expense_date: string | null; description: string; amount: number; category: string | null; notes: string | null }> }).candidates ?? [];
+								expCandidates = raw.map(c => ({ ...c, selected: true }));
+								if (raw.length === 0) {
+									expExtractMsg = 'No transactions found in the text.';
+								} else {
+									expExtractMsg = `${raw.length} transaction${raw.length > 1 ? 's' : ''} found — review below.`;
+								}
+							} else if (result.type === 'failure') {
+								expExtractMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
+							} else {
+								expExtractMsg = 'Extraction failed.';
+							}
+						};
+					}}
+				>
+					<input type="hidden" name="source" value="text" />
+					<textarea
+						name="text"
+						rows="4"
+						bind:value={expExtractText}
+						placeholder="Paste bank statement text, credit card transactions, or a receipt..."
+					></textarea>
+					<div class="extract-actions">
+						<button class="btn small" type="submit" disabled={expExtracting || !expExtractText.trim()}>
+							{expExtracting ? 'Extracting...' : 'Extract expenses'}
+						</button>
+						<label class="extract-opt">
+							<input type="checkbox" bind:checked={expSaveTextAsDoc} />
+							Also save text as document
+						</label>
+					</div>
+				</form>
+
+				{#if extractableDocs.length > 0}
+					<form
+						method="POST"
+						action="?/exp-extract"
+						class="extract-form"
+						use:enhance={() => {
+							expExtracting = true;
+							expExtractMsg = '';
+							return async ({ result }) => {
+								expExtracting = false;
+								if (result.type === 'success' && result.data?.ok) {
+									const raw = (result.data as { candidates?: Array<{ expense_date: string | null; description: string; amount: number; category: string | null; notes: string | null }> }).candidates ?? [];
+									expCandidates = raw.map(c => ({ ...c, selected: true }));
+									if (raw.length === 0) {
+										expExtractMsg = 'No transactions found in the document.';
+									} else {
+										expExtractMsg = `${raw.length} transaction${raw.length > 1 ? 's' : ''} found — review below.`;
+									}
+								} else if (result.type === 'failure') {
+									expExtractMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
+								} else {
+									expExtractMsg = 'Extraction failed.';
+								}
+							};
+						}}
+					>
+						<input type="hidden" name="source" value="document" />
+						<select name="attachment_id" bind:value={expExtractDocId} aria-label="document">
+							<option value="" disabled>Choose a document...</option>
+							{#each extractableDocs as a (a.id)}
+								<option value={a.id}>{a.display_name || a.original_name}</option>
+							{/each}
+						</select>
+						<button class="btn small" type="submit" disabled={expExtracting || !expExtractDocId}>
+							{expExtracting ? 'Extracting...' : 'Extract from document'}
+						</button>
+					</form>
+				{/if}
+				{#if expExtractMsg}<p class="extract-msg">{expExtractMsg}</p>{/if}
+			</div>
+
+			{#if expCandidates.length > 0}
+				<div class="candidates">
+					<div class="cand-list">
+						{#each expCandidates as c, i}
+							<div class="cand-row">
+								<input type="checkbox" bind:checked={c.selected} />
+								<span class="cand-date">{c.expense_date ?? '--'}</span>
+								<span class="cand-desc">{c.description}</span>
+								<span class="cand-amount">${c.amount.toFixed(2)}</span>
+								<select bind:value={c.category} class="cand-cat" aria-label="category">
+									{#each ['lodging', 'food', 'transport', 'activities', 'other'] as cat (cat)}
+										<option value={cat}>{cat}</option>
+									{/each}
+								</select>
+							</div>
+						{/each}
+					</div>
+					<div class="cand-actions">
+						<button class="btn small" type="button"
+							onclick={() => expCandidates.forEach(c => c.selected = true)}>Select all</button>
+						<button class="btn small" type="button"
+							onclick={() => expCandidates.forEach(c => c.selected = false)}>Select none</button>
+						<button class="btn small primary" type="button"
+							onclick={addSelectedExpenses}
+							disabled={!expCandidates.some(c => c.selected)}>
+							Add {expCandidates.filter(c => c.selected).length} expense{expCandidates.filter(c => c.selected).length !== 1 ? 's' : ''}
+						</button>
+						<button class="btn small" type="button"
+							onclick={() => { expCandidates = []; expExtractMsg = ''; }}>Clear</button>
+					</div>
+				</div>
+			{/if}
+
+			<form
+				method="POST"
+				action="?/exp-add"
+				class="edit-form"
+				use:enhance={() => {
+					return async ({ result, update }) => {
+						if (result.type === 'success') {
+							expDraft = emptyExpDraft();
+						}
+						await update();
+					};
+				}}
+			>
+				<p class="extract-head" style="margin-top: 8px">Or add manually</p>
+				<div class="form-row">
+					<input type="date" name="expense_date" bind:value={expDraft.expense_date} />
+					<select name="category" aria-label="category" bind:value={expDraft.category}>
+						{#each ['lodging', 'food', 'transport', 'activities', 'other'] as c (c)}
+							<option value={c}>{c}</option>
+						{/each}
+					</select>
+				</div>
+				<input name="description" placeholder="Description (required)" required bind:value={expDraft.description} />
+				<div class="form-row">
+					<input name="amount" placeholder="$0.00" inputmode="decimal" required bind:value={expDraft.amount} />
+					<select name="attachment_id" aria-label="linked document" bind:value={expDraft.attachment_id}>
+						<option value="">Link document (optional)</option>
+						{#each data.attachments as a (a.id)}
+							<option value={a.id}>{a.display_name || a.original_name}</option>
+						{/each}
+					</select>
+				</div>
+				<textarea name="notes" rows="1" placeholder="Notes (optional)" bind:value={expDraft.notes}></textarea>
+				<button class="btn small primary" type="submit">Add expense</button>
+			</form>
+		</details>
+	{/if}
+	{/if}
+</div>
+
 <!-- ── Trip actions ───────────────────────────────────── -->
 {#if !isViewer}
 	<div class="form-actions">
@@ -1642,5 +1981,169 @@
 	.upload-row input[name='display_name'] {
 		flex: 1;
 		min-width: 140px;
+	}
+	/* ── Expense section ── */
+	.expense-total {
+		font-size: 0.95rem;
+		font-weight: 600;
+		color: var(--accent);
+		white-space: nowrap;
+	}
+	.exp-row {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		padding: 10px 0;
+		flex-wrap: wrap;
+	}
+	.exp-main {
+		flex: 1;
+		min-width: 0;
+	}
+	.exp-desc {
+		font-weight: 500;
+	}
+	.exp-amount {
+		font-weight: 600;
+		font-size: 1rem;
+		white-space: nowrap;
+		text-align: right;
+		min-width: 70px;
+	}
+	.exp-doc-link {
+		font-size: 0.78rem;
+		color: var(--link);
+		text-decoration: none;
+		margin-top: 2px;
+		display: inline-block;
+	}
+	.exp-controls {
+		display: flex;
+		gap: 2px;
+	}
+	.exp-controls form {
+		margin: 0;
+	}
+	.exp-controls button {
+		border: 1px solid var(--border);
+		background: var(--card);
+		border-radius: 6px;
+		min-width: 30px;
+		min-height: 32px;
+		color: var(--muted);
+	}
+	.exp-controls button.del {
+		color: var(--danger);
+	}
+	.exp-total-row {
+		display: flex;
+		justify-content: space-between;
+		align-items: center;
+		padding: 12px 0 4px;
+		font-weight: 600;
+		border-top: 2px solid var(--border);
+	}
+	.exp-total-row .exp-amount {
+		font-size: 1.1rem;
+	}
+	.cat-subtotals {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		padding: 6px 0 8px;
+		font-size: 0.82rem;
+		color: var(--muted);
+	}
+	.cat-sub {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.form-row {
+		display: flex;
+		gap: 8px;
+	}
+	.form-row input[type='date'] {
+		max-width: 150px;
+	}
+	.form-row input[name='amount'] {
+		max-width: 110px;
+	}
+	.extract-actions {
+		display: flex;
+		gap: 8px;
+		align-items: center;
+		margin-top: 6px;
+	}
+	.extract-opt {
+		font-size: 0.82rem;
+		color: var(--muted);
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.candidates {
+		background: var(--accent-soft);
+		border: 1px solid var(--accent);
+		border-radius: 8px;
+		padding: 12px;
+		margin: 12px 0;
+	}
+	.cand-row {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		padding: 6px 0;
+		border-top: 1px solid rgba(0, 0, 0, 0.08);
+		flex-wrap: wrap;
+	}
+	.cand-row:first-child {
+		border-top: none;
+	}
+	.cand-row input[type='checkbox'] {
+		width: 20px;
+		height: 20px;
+		flex-shrink: 0;
+	}
+	.cand-date {
+		font-size: 0.82rem;
+		color: var(--muted);
+		width: 80px;
+		flex-shrink: 0;
+	}
+	.cand-desc {
+		flex: 1;
+		min-width: 0;
+		font-size: 0.9rem;
+	}
+	.cand-amount {
+		font-weight: 600;
+		font-size: 0.9rem;
+		white-space: nowrap;
+		min-width: 60px;
+		text-align: right;
+	}
+	.cand-cat {
+		font-size: 0.8rem;
+		padding: 4px;
+		border: 1px solid var(--border);
+		border-radius: 4px;
+	}
+	.cand-actions {
+		display: flex;
+		gap: 6px;
+		flex-wrap: wrap;
+		margin-top: 10px;
+		padding-top: 8px;
+		border-top: 1px solid rgba(0, 0, 0, 0.08);
+	}
+	@media (max-width: 639px) {
+		.exp-controls {
+			width: 100%;
+			padding-top: 4px;
+		}
+		.form-row {
+			flex-wrap: wrap;
+		}
 	}
 </style>

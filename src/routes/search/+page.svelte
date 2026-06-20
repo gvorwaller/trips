@@ -7,7 +7,8 @@
 		place: 'Place',
 		packing: 'Packing',
 		reservation: 'Reservation',
-		document: 'Document'
+		document: 'Document',
+		expense: 'Expense'
 	};
 </script>
 
