@@ -7,7 +7,7 @@ const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
 const TIMEOUT_MS = 30_000;
 
-const DEFAULT_MODEL = env.ANTHROPIC_EXPENSE_MODEL ?? 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = env.ANTHROPIC_EXPENSE_MODEL ?? 'claude-sonnet-4-6';
 
 const VISION_MIME = new Set([
 	'application/pdf',
