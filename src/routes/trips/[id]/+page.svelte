@@ -187,6 +187,108 @@
 		invalidateAll();
 	}
 
+	// ── Itinerary import state ──
+	interface ItinCandidateRaw {
+		item_type: string;
+		title: string;
+		date: string | null;
+		notes: string | null;
+		external_url: string | null;
+		address: string | null;
+		location_query: string | null;
+		lat: number | null;
+		lon: number | null;
+		children: ItinCandidateRaw[];
+		duplicate?: boolean;
+		duplicate_title?: string | null;
+	}
+	interface ItinCandidate
+		extends Omit<
+			ItinCandidateRaw,
+			'date' | 'notes' | 'external_url' | 'address' | 'location_query' | 'children'
+		> {
+		date: string;
+		notes: string;
+		external_url: string;
+		address: string;
+		location_query: string;
+		children: ItinCandidate[];
+		selected: boolean;
+	}
+	let itinExtractText = $state('');
+	let itinExtracting = $state(false);
+	let itinExtractMsg = $state('');
+	let itinCandidates = $state<ItinCandidate[]>([]);
+	let itinImportParentId = $state('');
+	let itinGeocode = $state(true);
+	const itinImportParents = $derived(
+		data.itineraryRows.filter((r) =>
+			['day', 'section', 'place'].includes(r.node.item_type)
+		)
+	);
+
+	function withItinSelection(raw: ItinCandidateRaw[]): ItinCandidate[] {
+		return raw.map((c) => ({
+			...c,
+			date: c.date ?? '',
+			notes: c.notes ?? '',
+			external_url: c.external_url ?? '',
+			address: c.address ?? '',
+			location_query: c.location_query ?? '',
+			selected: !c.duplicate,
+			children: withItinSelection(c.children ?? [])
+		}));
+	}
+
+	function walkItinCandidates(items: ItinCandidate[], fn: (item: ItinCandidate) => void) {
+		for (const item of items) {
+			fn(item);
+			walkItinCandidates(item.children ?? [], fn);
+		}
+	}
+
+	function selectedItinCount(): number {
+		let count = 0;
+		walkItinCandidates(itinCandidates, (item) => {
+			if (item.selected) count += 1;
+		});
+		return count;
+	}
+
+	function selectAllItin(selected: boolean) {
+		walkItinCandidates(itinCandidates, (item) => {
+			item.selected = selected;
+		});
+	}
+
+	function selectedItin(items: ItinCandidate[]): ItinCandidate[] {
+		const out: ItinCandidate[] = [];
+		for (const item of items) {
+			const children = selectedItin(item.children ?? []);
+			if (item.selected) out.push({ ...item, children });
+			else out.push(...children);
+		}
+		return out;
+	}
+
+	async function importSelectedItinerary() {
+		const selected = selectedItin(itinCandidates);
+		if (selected.length === 0) return;
+		const fd = new FormData();
+		fd.set('candidates', JSON.stringify(selected));
+		fd.set('parent_id', itinImportParentId);
+		fd.set('geocode', itinGeocode ? 'true' : 'false');
+		const res = await fetch('?/itin-import-candidates', { method: 'POST', body: fd });
+		if (res.ok) {
+			itinCandidates = [];
+			itinExtractText = '';
+			itinExtractMsg = '';
+			await invalidateAll();
+		} else {
+			itinExtractMsg = 'Import failed. Review the candidates and try again.';
+		}
+	}
+
 	// Single shared confirm-delete modal. Every ✕ / Delete control opens this
 	// instead of submitting immediately, so no deletion (and no parent_id
 	// ON DELETE CASCADE wipe of children) happens without confirmation. (td-02acd0)
@@ -523,6 +625,40 @@
 	</li>
 {/snippet}
 
+{#snippet itineraryCandidateRows(items: ItinCandidate[], depth: number)}
+	{#each items as c}
+		<div class="itin-cand-row" style="margin-left: {depth * 18}px">
+			<label class="itin-cand-check">
+				<input type="checkbox" bind:checked={c.selected} />
+				<span class="sr-only">Import {c.title}</span>
+			</label>
+			<div class="itin-cand-fields">
+				<div class="form-row">
+					<select bind:value={c.item_type} aria-label="type">
+						{#each ['place', 'day', 'section', 'note'] as t (t)}
+							<option value={t}>{t}</option>
+						{/each}
+					</select>
+					<input bind:value={c.title} placeholder="Title" />
+					<input type="date" bind:value={c.date} aria-label="date" />
+				</div>
+				<textarea bind:value={c.notes} rows="2" placeholder="Brief notes"></textarea>
+				<div class="form-row">
+					<input bind:value={c.address} placeholder="Address (if known)" />
+					<input bind:value={c.location_query} placeholder="Location query" />
+				</div>
+				<input bind:value={c.external_url} placeholder="Reference URL" />
+				{#if c.duplicate}
+					<p class="dup-warning">Possible duplicate: {c.duplicate_title}</p>
+				{/if}
+			</div>
+		</div>
+		{#if c.children.length > 0}
+			{@render itineraryCandidateRows(c.children, depth + 1)}
+		{/if}
+	{/each}
+{/snippet}
+
 <!-- ── PLACES ─────────────────────────────────────────── -->
 <div class="card">
 	<button class="section-toggle" type="button" onclick={() => toggleSection('places')}>
@@ -664,6 +800,99 @@
 				></textarea>
 				<button class="btn small" type="submit">Add all</button>
 			</form>
+		</details>
+		<details class="paste">
+			<summary>Import itinerary from text</summary>
+			<div class="extract">
+				<p class="extract-head">Paste AI output, notes, web text, or bullets. Review before importing.</p>
+				<form
+					method="POST"
+					action="?/itin-extract"
+					class="extract-form"
+					use:enhance={() => {
+						itinExtracting = true;
+						itinExtractMsg = '';
+						return async ({ result }) => {
+							itinExtracting = false;
+							if (result.type === 'success' && result.data?.ok) {
+								const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
+								itinCandidates = withItinSelection(raw);
+								if (raw.length === 0) {
+									itinExtractMsg = 'No itinerary items found in the text.';
+								} else {
+									const dupes = raw.filter((c) => c.duplicate).length;
+									itinExtractMsg = `${raw.length} item${raw.length === 1 ? '' : 's'} found${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+								}
+							} else if (result.type === 'failure') {
+								itinExtractMsg =
+									(result.data as { error?: string })?.error ?? 'Extraction failed.';
+							} else {
+								itinExtractMsg = 'Extraction failed.';
+							}
+						};
+					}}
+				>
+					<textarea
+						name="text"
+						rows="5"
+						bind:value={itinExtractText}
+						placeholder="Paste rough itinerary text here..."
+					></textarea>
+					<button class="btn small" type="submit" disabled={itinExtracting || !itinExtractText.trim()}>
+						{itinExtracting ? 'Extracting...' : 'Extract itinerary'}
+					</button>
+				</form>
+				{#if itinExtractMsg}<p class="extract-msg">{itinExtractMsg}</p>{/if}
+			</div>
+
+			{#if itinCandidates.length > 0}
+				<div class="candidates itinerary-candidates">
+					<div class="import-target">
+						<label>
+							Import under
+							<select bind:value={itinImportParentId}>
+								<option value="">Top level</option>
+								{#each itinImportParents as { node, depth } (node.id)}
+									<option value={String(node.id)}>
+										{'· '.repeat(depth)}{node.title} ({node.item_type})
+									</option>
+								{/each}
+							</select>
+						</label>
+						<label class="extract-opt">
+							<input type="checkbox" bind:checked={itinGeocode} />
+							Geocode places
+						</label>
+					</div>
+					<div class="cand-list">
+						{@render itineraryCandidateRows(itinCandidates, 0)}
+					</div>
+					<div class="cand-actions">
+						<button class="btn small" type="button" onclick={() => selectAllItin(true)}>
+							Select all
+						</button>
+						<button class="btn small" type="button" onclick={() => selectAllItin(false)}>
+							Select none
+						</button>
+						<button
+							class="btn small primary"
+							type="button"
+							onclick={importSelectedItinerary}
+							disabled={selectedItinCount() === 0}
+						>
+							Import {selectedItinCount()} item{selectedItinCount() === 1 ? '' : 's'}
+						</button>
+						<button
+							class="btn small"
+							type="button"
+							onclick={() => {
+								itinCandidates = [];
+								itinExtractMsg = '';
+							}}>Clear</button
+						>
+					</div>
+				</div>
+			{/if}
 		</details>
 	{/if}
 	{/if}
@@ -1770,6 +1999,17 @@
 		font-size: 0.82rem;
 		color: var(--link);
 	}
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		white-space: nowrap;
+		border: 0;
+	}
 	.edit summary,
 	.paste summary {
 		cursor: pointer;
@@ -2088,6 +2328,72 @@
 		border-radius: 8px;
 		padding: 12px;
 		margin: 12px 0;
+	}
+	.itinerary-candidates {
+		background: var(--bg);
+		border-color: var(--border);
+	}
+	.import-target {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+		align-items: center;
+		margin-bottom: 8px;
+	}
+	.import-target label {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: 0.85rem;
+		color: var(--muted);
+	}
+	.import-target select,
+	.itin-cand-fields input,
+	.itin-cand-fields select,
+	.itin-cand-fields textarea {
+		font-size: 0.9rem;
+		padding: 6px 8px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+	}
+	.itin-cand-row {
+		display: flex;
+		gap: 8px;
+		padding: 10px 0;
+		border-top: 1px solid var(--border);
+	}
+	.itin-cand-row:first-child {
+		border-top: none;
+	}
+	.itin-cand-check {
+		padding-top: 8px;
+	}
+	.itin-cand-check input {
+		width: 20px;
+		height: 20px;
+	}
+	.itin-cand-fields {
+		display: grid;
+		gap: 6px;
+		flex: 1;
+		min-width: 0;
+	}
+	.itin-cand-fields .form-row {
+		flex-wrap: wrap;
+	}
+	.itin-cand-fields input,
+	.itin-cand-fields textarea {
+		min-width: 0;
+		flex: 1 1 140px;
+	}
+	.itin-cand-fields textarea {
+		width: 100%;
+		resize: vertical;
+	}
+	.dup-warning {
+		margin: 0;
+		color: var(--danger);
+		font-size: 0.8rem;
 	}
 	.cand-row {
 		display: flex;

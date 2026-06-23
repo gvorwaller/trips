@@ -35,6 +35,12 @@
 		<em>day</em>, add your <em>place</em> stops, then indent the places under the day.
 		<strong>Paste many</strong> adds a batch of places, one per line.
 	</p>
+	<p>
+		<strong>Import itinerary from text</strong> accepts rough notes, AI output, web text, or bullets.
+		It extracts candidate places/notes, flags likely duplicates, and lets you review/edit before
+		anything is saved. For best organization, choose an existing day or section in
+		<strong>Import under</strong>; top-level import is still available.
+	</p>
 
 	<h2>Packing</h2>
 	<p>

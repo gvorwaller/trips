@@ -59,6 +59,14 @@ import {
 	extractExpensesFromDocument
 } from '$server/expense-extract';
 import {
+	extractItineraryFromText,
+	type ExtractedItineraryItem
+} from '$server/itinerary-extract';
+import {
+	importItineraryCandidates,
+	type ItineraryImportCandidate
+} from '$server/itinerary-import';
+import {
 	listAttachmentsForTrip,
 	uploadAttachment,
 	createTextDocument,
@@ -132,6 +140,41 @@ function ctx(locals: App.Locals, params: { id: string }) {
 async function ownTrip(ownerId: number, tripId: number) {
 	const trip = await getTrip(ownerId, tripId);
 	if (!trip) throw error(404, 'Trip not found');
+	return trip;
+}
+
+function normalizeTitle(s: string): string {
+	return s
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, ' ')
+		.trim();
+}
+
+function duplicateHint(
+	title: string,
+	existing: { title: string }[]
+): { duplicate: boolean; duplicate_title: string | null } {
+	const n = normalizeTitle(title);
+	if (!n) return { duplicate: false, duplicate_title: null };
+	for (const item of existing) {
+		const e = normalizeTitle(item.title);
+		if (!e) continue;
+		if (e === n || e.includes(n) || n.includes(e)) {
+			return { duplicate: true, duplicate_title: item.title };
+		}
+	}
+	return { duplicate: false, duplicate_title: null };
+}
+
+function markDuplicates<T extends ExtractedItineraryItem>(
+	items: T[],
+	existing: { title: string }[]
+): Array<T & { duplicate: boolean; duplicate_title: string | null }> {
+	return items.map((item) => ({
+		...item,
+		...duplicateHint(item.title, existing),
+		children: markDuplicates(item.children, existing)
+	}));
 }
 
 export const actions: Actions = {
@@ -162,6 +205,52 @@ export const actions: Actions = {
 			lines
 		);
 		return { ok: true, added: n };
+	},
+
+	'itin-extract': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		const trip = await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const text = (form.get('text') ?? '').toString();
+		if (!text.trim()) return fail(400, { error: 'Paste itinerary text first.' });
+		const existing = await listItinerary(tripId);
+		const tripDates =
+			trip.start_date || trip.end_date ? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}` : '';
+		const candidates = await extractItineraryFromText(text, {
+			tripName: trip.name,
+			tripDates,
+			tripNotes: trip.notes,
+			existingTitles: existing.map((i) => i.title)
+		});
+		if (!candidates) {
+			return fail(502, {
+				error: 'Could not extract itinerary candidates. Try simplifying the text or add places manually.'
+			});
+		}
+		return { ok: true, candidates: markDuplicates(candidates, existing) };
+	},
+
+	'itin-import-candidates': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		const trip = await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const raw = form.get('candidates')?.toString();
+		if (!raw) return fail(400, { error: 'No itinerary candidates provided.' });
+		let candidates: ItineraryImportCandidate[];
+		try {
+			candidates = JSON.parse(raw);
+		} catch {
+			return fail(400, { error: 'Invalid itinerary candidate data.' });
+		}
+		if (!Array.isArray(candidates) || candidates.length === 0) {
+			return fail(400, { error: 'No itinerary candidates selected.' });
+		}
+		const imported = await importItineraryCandidates(tripId, candidates, {
+			parentId: optId(form.get('parent_id')),
+			geocode: form.get('geocode') !== 'false',
+			tripName: trip.name
+		});
+		return { ok: true, imported };
 	},
 
 	'itin-edit': async ({ params, request, locals }) => {
