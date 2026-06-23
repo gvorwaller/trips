@@ -1,7 +1,7 @@
 # NAS Spaces Backup (trips attachment blobs)
 
 Date: 2026-06-18
-Status: **scripts written; NAS-side setup pending** (see Setup Runbook)
+Status: **active on NAS as of 2026-06-23**.
 
 ## Purpose
 
@@ -12,7 +12,7 @@ mirrors the madonnahist setup: the Synology NAS pulls the production Spaces
 bucket directly to Volume 3 so there is a local copy of the actual files, with
 no scheduled backup traffic routed through a Mac.
 
-## Intended NAS Layout
+## NAS Layout
 
 ```text
 /volume3/gaylon-trips-spaces-backup
@@ -23,7 +23,7 @@ no scheduled backup traffic routed through a Mac.
 └── restore-drills/
 ```
 
-The dedicated share should be `gaylon-trips-spaces-backup` on Volume 3 with
+The dedicated share is `gaylon-trips-spaces-backup` on Volume 3 with
 `@administrators` read/write access (Btrfs, so snapshots work).
 
 ## Scripts
@@ -35,7 +35,7 @@ scripts/nas/backup-spaces.sh
 scripts/nas/snapshot-spaces-backup.sh
 ```
 
-Deployed NAS copies (target):
+Deployed NAS copies:
 
 ```text
 /volume3/gaylon-trips-spaces-backup/backup-spaces.sh
@@ -62,14 +62,15 @@ must have List + Get on `gaylon-trips`.
 
 The endpoint/region are identical (sfo3), so only the access key/secret differ.
 
-## Setup Runbook (one-time, on the NAS)
+## Setup Record
 
-These steps need DSM admin / sudo / the Spaces secret, so they are done by hand
-(not by the repo tooling). SSH alias: `nas-git` (NASADMIN@192.168.22.74).
+Completed 2026-06-23. SSH path used the `sshNAS` alias expansion:
+`NASADMIN@192.168.22.74` with `~/.ssh/git_nas_key`.
 
-1. **Create the shared folder** in DSM: Control Panel → Shared Folder → Create
+1. Shared folder created in DSM: Control Panel -> Shared Folder -> Create
    `gaylon-trips-spaces-backup` on Volume 3, Btrfs, `@administrators` r/w.
-2. **Add the `do-trips` rclone remote** with the trips Spaces key/secret:
+2. Added `do-trips` rclone remote with the trips Spaces key/secret from
+   `/opt/trips/.env` on the DigitalOcean droplet:
    ```sh
    export PATH=/var/services/homes/NASADMIN/bin:$PATH
    rclone config create do-trips s3 \
@@ -82,28 +83,53 @@ These steps need DSM admin / sudo / the Spaces secret, so they are done by hand
    # verify (should NOT 403):
    rclone size do-trips:gaylon-trips --json
    ```
-3. **Deploy the scripts** from the repo to the share:
-   ```sh
-   # from the Mac, repo root:
-   scp scripts/nas/backup-spaces.sh scripts/nas/snapshot-spaces-backup.sh \
-       nas-git:/volume3/gaylon-trips-spaces-backup/
-   ssh nas-git 'chmod +x /volume3/gaylon-trips-spaces-backup/*.sh'
+   Initial verification returned:
+   ```json
+   {"count":3,"bytes":904589,"sizeless":0}
    ```
-4. **Dry-run, then first live pull:**
+3. Deployed the scripts from the repo to the share:
    ```sh
-   ssh nas-git '/volume3/gaylon-trips-spaces-backup/backup-spaces.sh --dry-run'
-   ssh nas-git '/volume3/gaylon-trips-spaces-backup/backup-spaces.sh'
+   # scp subsystem is disabled on this NAS, so deploy via ssh stdin:
+   sshNAS 'cat > /volume3/gaylon-trips-spaces-backup/backup-spaces.sh' \
+     < scripts/nas/backup-spaces.sh
+   sshNAS 'cat > /volume3/gaylon-trips-spaces-backup/snapshot-spaces-backup.sh' \
+     < scripts/nas/snapshot-spaces-backup.sh
+   sshNAS 'chmod +x /volume3/gaylon-trips-spaces-backup/*.sh'
    ```
-5. **Schedule** (DSM Task Scheduler is preferred; or root crontab). Mirror the
-   madonnahist cadence — pull daily, snapshot shortly after:
+4. Dry-run, then first live pull:
+   ```sh
+   sshNAS '/volume3/gaylon-trips-spaces-backup/backup-spaces.sh --dry-run'
+   sshNAS '/volume3/gaylon-trips-spaces-backup/backup-spaces.sh'
+   ```
+   First live pull:
+   ```text
+   objects=3 bytes=904589
+   log=/volume3/gaylon-trips-spaces-backup/logs/spaces-rclone-20260623T161436Z.log
+   manifest=/volume3/gaylon-trips-spaces-backup/manifests/spaces-rclone-manifest-20260623T161436Z.json
+   ```
+5. Scheduled in `/etc/crontab`, offset from madonnahist's 03:15/04:15 jobs:
    ```cron
    # trips Spaces backup: NAS pulls DO Spaces to Volume 3 daily.
    30 3 * * * NASADMIN /volume3/gaylon-trips-spaces-backup/backup-spaces.sh >> /volume3/gaylon-trips-spaces-backup/logs/spaces-cron.log 2>&1
    30 4 * * * root /volume3/gaylon-trips-spaces-backup/snapshot-spaces-backup.sh
    ```
-   (Offset 15 min from madonnahist's 03:15/04:15 so the two pulls don't overlap.)
-6. **Restore drill:** pick one object, restore it, and compare SHA-256 against
-   the same object pulled fresh from Spaces; record under `restore-drills/`.
+6. Snapshot created successfully; `synosharesnapshot list gaylon-trips-spaces-backup`
+   reported:
+   ```text
+   GMT-05-2026.06.23-11.15.01
+   ```
+7. Restore drill completed and recorded under:
+   ```text
+   /volume3/gaylon-trips-spaces-backup/restore-drills/20260623T161637Z/restore-drill.json
+   ```
+   Restored object:
+   ```text
+   trips/1/8ca5bd847e56e01f/PDF_document.pdf
+   ```
+   SHA-256 matched Spaces:
+   ```text
+   c930c30779c4f387ed077e36f2a4fd98e5b88068320eb57d1bc25bde8ea6c205
+   ```
 
 ## Backup Semantics
 
