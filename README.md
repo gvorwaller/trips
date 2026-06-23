@@ -7,7 +7,7 @@ A private, mobile-first trip planning web app for one owner and one read-only vi
 - **SvelteKit 2** + Svelte 5 (runes) + TypeScript
 - **PostgreSQL** via `pg` (node-postgres) — no ORM
 - **DO Spaces** (S3-compatible) for attachment storage
-- **Anthropic API** for reservation and expense extraction from documents
+- **Anthropic API** for itinerary, reservation, and expense extraction
 - **Google Maps** for place search, geocoding, and map pins
 - **argon2** password hashing + session cookies
 - Component-scoped CSS (no utility frameworks)
@@ -15,7 +15,7 @@ A private, mobile-first trip planning web app for one owner and one read-only vi
 
 ## Features
 
-- **Itinerary** — nestable outliner with item types: place, day, section, note. Places get map pins and one-tap Google/Apple/directions links. Multi-stop day routes.
+- **Itinerary** — nestable outliner with item types: place, day, section, note. Places get map pins and one-tap Google/Apple/directions links. Multi-stop day routes. Freeform text import extracts candidate places/notes for review before saving.
 - **Packing** — nestable lists with check-off tracking, progress bars, templates, paste-many. Packing-only print.
 - **Reservations** — accommodation, flight, restaurant, transport, other. LLM extraction from pasted confirmations or uploaded documents. Manual reorder.
 - **Expenses** — manual entry or LLM extraction from bank statements / receipt screenshots. Category subtotals (lodging, food, transport, activities, other) and running total.
@@ -108,6 +108,14 @@ Runs on a shared DO droplet alongside sibling apps:
 | trips | 3004 | 5437 |
 
 Health endpoint: `GET /api/health` returns `{"db":"ok","version":"<git-sha>"}`.
+
+### Backups
+
+- `scripts/backup-pg.sh` captures local/prod PostgreSQL snapshots, including attachment metadata and Spaces object keys.
+- Attachment bytes live in the private `gaylon-trips` DO Spaces bucket.
+- The Synology NAS pulls that bucket directly via rclone remote `do-trips` to `/volume3/gaylon-trips-spaces-backup/current`.
+- NAS schedule: daily pull at `03:30`, daily Btrfs snapshot at `04:30`.
+- Operational details, status files, and restore-drill notes live in `docs/nas-spaces-backup.md`.
 
 ## Migrations
 
