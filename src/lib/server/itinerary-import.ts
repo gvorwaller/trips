@@ -5,6 +5,7 @@ import { nextSortOrder } from './tree-sql';
 import type pg from 'pg';
 
 const MAX_ITEMS = 200;
+const ITINERARY_IMPORT_LOCK_NS = 774747;
 
 export interface ItineraryImportCandidate {
 	item_type?: string | null;
@@ -29,6 +30,46 @@ interface PreparedItem {
 	lon: number | null;
 	place_id: string | null;
 	children: PreparedItem[];
+}
+
+function normalizeTitle(s: string): string {
+	return s
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, ' ')
+		.trim();
+}
+
+function titleLooksDuplicate(title: string, seen: Set<string>): boolean {
+	const n = normalizeTitle(title);
+	if (!n) return false;
+	for (const existing of seen) {
+		if (existing === n || existing.includes(n) || n.includes(existing)) return true;
+	}
+	return false;
+}
+
+function collectChildTitles(item: PreparedItem, seen: Set<string>) {
+	for (const child of item.children) collectTitles(child, seen);
+}
+
+function collectTitles(item: PreparedItem, seen: Set<string>) {
+	const n = normalizeTitle(item.title);
+	if (n) seen.add(n);
+	collectChildTitles(item, seen);
+}
+
+function filterDuplicatePrepared(items: PreparedItem[], seen: Set<string>): PreparedItem[] {
+	const out: PreparedItem[] = [];
+	for (const item of items) {
+		if (titleLooksDuplicate(item.title, seen)) continue;
+		const n = normalizeTitle(item.title);
+		if (n) seen.add(n);
+		const children = filterDuplicatePrepared(item.children, seen);
+		const accepted = { ...item, children };
+		collectChildTitles(accepted, seen);
+		out.push(accepted);
+	}
+	return out;
 }
 
 export interface ImportOptions {
@@ -179,9 +220,19 @@ export async function importItineraryCandidates(
 	if (prepared.length === 0) return 0;
 
 	return withTransaction(async (client) => {
+		await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
+			ITINERARY_IMPORT_LOCK_NS,
+			tripId
+		]);
 		await assertParentInTrip(client, tripId, options.parentId);
+		const existing = await client.query<{ title: string }>(
+			'SELECT title FROM itinerary_items WHERE trip_id = $1',
+			[tripId]
+		);
+		const seen = new Set(existing.rows.map((row) => normalizeTitle(row.title)).filter(Boolean));
+		const uniquePrepared = filterDuplicatePrepared(prepared, seen);
 		let imported = 0;
-		for (const item of prepared) {
+		for (const item of uniquePrepared) {
 			imported += await insertPrepared(client, tripId, options.parentId, item);
 		}
 		return imported;

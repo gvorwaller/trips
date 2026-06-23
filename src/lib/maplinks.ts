@@ -18,21 +18,27 @@ function coordStr(p: MapPlace & { lat: number; lon: number }): string {
 	return `${p.lat},${p.lon}`;
 }
 
-/** "View on Google Maps" — prefers place_id, then coordinates, then a name search. */
+function searchToken(p: MapPlace): string {
+	return p.name || (hasCoords(p) ? coordStr(p) : 'place');
+}
+
+/** "View on Google Maps" — prefers place_id, then a named place search, then coordinates. */
 export function googleMapsLink(p: MapPlace): string {
 	const base = 'https://www.google.com/maps/search/?api=1';
 	if (p.place_id) {
 		return `${base}&query=${encodeURIComponent(p.name || 'place')}&query_place_id=${encodeURIComponent(p.place_id)}`;
 	}
-	if (hasCoords(p)) return `${base}&query=${encodeURIComponent(coordStr(p))}`;
-	return `${base}&query=${encodeURIComponent(p.name)}`;
+	return `${base}&query=${encodeURIComponent(searchToken(p))}`;
 }
 
 /** "Open in Apple Maps" — https form redirects into the app on iOS. */
 export function appleMapsLink(p: MapPlace): string {
 	const params = new URLSearchParams();
-	if (p.name) params.set('q', p.name);
-	if (hasCoords(p)) params.set('ll', coordStr(p));
+	if (p.name) {
+		params.set('q', p.name);
+	} else if (hasCoords(p)) {
+		params.set('ll', coordStr(p));
+	}
 	return `https://maps.apple.com/?${params.toString()}`;
 }
 

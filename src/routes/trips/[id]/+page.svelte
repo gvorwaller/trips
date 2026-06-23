@@ -217,6 +217,7 @@
 	}
 	let itinExtractText = $state('');
 	let itinExtracting = $state(false);
+	let itinImporting = $state(false);
 	let itinExtractMsg = $state('');
 	let itinCandidates = $state<ItinCandidate[]>([]);
 	let itinImportParentId = $state('');
@@ -272,20 +273,26 @@
 	}
 
 	async function importSelectedItinerary() {
+		if (itinImporting) return;
 		const selected = selectedItin(itinCandidates);
 		if (selected.length === 0) return;
+		itinImporting = true;
 		const fd = new FormData();
 		fd.set('candidates', JSON.stringify(selected));
 		fd.set('parent_id', itinImportParentId);
 		fd.set('geocode', itinGeocode ? 'true' : 'false');
-		const res = await fetch('?/itin-import-candidates', { method: 'POST', body: fd });
-		if (res.ok) {
-			itinCandidates = [];
-			itinExtractText = '';
-			itinExtractMsg = '';
-			await invalidateAll();
-		} else {
-			itinExtractMsg = 'Import failed. Review the candidates and try again.';
+		try {
+			const res = await fetch('?/itin-import-candidates', { method: 'POST', body: fd });
+			if (res.ok) {
+				itinCandidates = [];
+				itinExtractText = '';
+				itinExtractMsg = '';
+				await invalidateAll();
+			} else {
+				itinExtractMsg = 'Import failed. Review the candidates and try again.';
+			}
+		} finally {
+			itinImporting = false;
 		}
 	}
 
@@ -878,9 +885,11 @@
 							class="btn small primary"
 							type="button"
 							onclick={importSelectedItinerary}
-							disabled={selectedItinCount() === 0}
+							disabled={itinImporting || selectedItinCount() === 0}
 						>
-							Import {selectedItinCount()} item{selectedItinCount() === 1 ? '' : 's'}
+							{itinImporting
+								? 'Importing...'
+								: `Import ${selectedItinCount()} item${selectedItinCount() === 1 ? '' : 's'}`}
 						</button>
 						<button
 							class="btn small"

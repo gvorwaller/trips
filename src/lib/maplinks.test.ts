@@ -12,8 +12,13 @@ describe('googleMapsLink', () => {
 		expect(u).toContain('query_place_id=CHIJabc');
 		expect(u).toContain('query=Palais%20des%20Papes');
 	});
-	it('uses coordinates when no place_id', () => {
-		expect(googleMapsLink({ name: 'X', lat: 43.95, lon: 4.81 })).toContain('query=43.95%2C4.81');
+	it('uses a name search even when coordinates exist', () => {
+		expect(googleMapsLink({ name: 'Arborvine', lat: 44.4115, lon: -68.5924 })).toContain(
+			'query=Arborvine'
+		);
+	});
+	it('uses coordinates only when no name exists', () => {
+		expect(googleMapsLink({ name: '', lat: 43.95, lon: 4.81 })).toContain('query=43.95%2C4.81');
 	});
 	it('falls back to a name search', () => {
 		expect(googleMapsLink({ name: 'Pont du Gard' })).toContain('query=Pont%20du%20Gard');
@@ -21,10 +26,14 @@ describe('googleMapsLink', () => {
 });
 
 describe('appleMapsLink', () => {
-	it('includes ll when coordinates exist', () => {
+	it('uses a name search when a name exists', () => {
 		const u = appleMapsLink({ name: 'Arles', lat: 43.67, lon: 4.63 });
-		expect(u).toContain('ll=43.67%2C4.63');
 		expect(u).toContain('q=Arles');
+		expect(u).not.toContain('ll=');
+	});
+	it('includes ll when only coordinates exist', () => {
+		const u = appleMapsLink({ name: '', lat: 43.67, lon: 4.63 });
+		expect(u).toContain('ll=43.67%2C4.63');
 	});
 	it('name-only still produces a query', () => {
 		expect(appleMapsLink({ name: 'Arles' })).toBe('https://maps.apple.com/?q=Arles');
