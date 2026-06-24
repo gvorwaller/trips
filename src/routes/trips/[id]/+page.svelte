@@ -783,7 +783,16 @@
 					{#if !isViewer}
 						<details class="edit">
 							<summary>edit</summary>
-							<form method="POST" action="?/itin-edit" use:enhance class="edit-form">
+							<form
+								method="POST"
+								action="?/itin-edit"
+								use:enhance={() => {
+									return async ({ update }) => {
+										await update({ reset: false });
+									};
+								}}
+								class="edit-form"
+							>
 								<input type="hidden" name="id" value={node.id} />
 								<input name="title" value={node.title} placeholder="Title" />
 								<input
