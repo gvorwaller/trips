@@ -7,6 +7,7 @@ import {
 	bulkCreate,
 	updateItem,
 	deleteItem,
+	getItem,
 	ITEM_TYPES,
 	type ItemType
 } from '$server/itinerary';
@@ -284,6 +285,25 @@ export const actions: Actions = {
 		const form = await request.formData();
 		await runTreeOp('itinerary_items', tripId, parseId(form.get('id')), asOp(form.get('op')));
 		return { ok: true };
+	},
+
+	'itin-reparent': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const id = parseId(form.get('id'));
+		const parentId = optId(form.get('parent_id'));
+		const item = await getItem(tripId, id);
+		if (!item) throw error(404, 'Item not found');
+		if (item.parent_id === parentId) return { ok: true, moved: false };
+		const ok = await runReparent(
+			'itinerary_items',
+			tripId,
+			id,
+			parentId,
+			Number.MAX_SAFE_INTEGER
+		);
+		return { ok, moved: ok };
 	},
 
 	// ── Packing lists ──────────────────────────────────────

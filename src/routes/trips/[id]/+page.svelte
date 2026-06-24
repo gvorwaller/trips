@@ -228,6 +228,21 @@
 		)
 	);
 
+	function isItinDescendant(candidateId: number, ancestorId: number): boolean {
+		let current = data.itineraryRows.find((r) => r.node.id === candidateId)?.node;
+		while (current?.parent_id != null) {
+			if (current.parent_id === ancestorId) return true;
+			current = data.itineraryRows.find((r) => r.node.id === current?.parent_id)?.node;
+		}
+		return false;
+	}
+
+	function itinMoveParentsFor(id: number) {
+		return itinImportParents.filter(
+			({ node }) => node.id !== id && !isItinDescendant(node.id, id)
+		);
+	}
+
 	function withItinSelection(raw: ItinCandidateRaw[]): ItinCandidate[] {
 		return raw.map((c) => ({
 			...c,
@@ -779,6 +794,24 @@
 								<input name="date" type="date" value={node.date ?? ''} />
 								<textarea name="notes" rows="2" placeholder="Notes">{node.notes ?? ''}</textarea>
 								<button class="btn small primary" type="submit">Save</button>
+							</form>
+							<form method="POST" action="?/itin-reparent" use:enhance class="move-under-form">
+								<input type="hidden" name="id" value={node.id} />
+								<label>
+									Move under
+									<select name="parent_id">
+										<option value="" selected={node.parent_id === null}>Top level</option>
+										{#each itinMoveParentsFor(node.id) as parentRow (parentRow.node.id)}
+											<option
+												value={String(parentRow.node.id)}
+												selected={node.parent_id === parentRow.node.id}
+											>
+												{'· '.repeat(parentRow.depth)}{parentRow.node.title} ({parentRow.node.item_type})
+											</option>
+										{/each}
+									</select>
+								</label>
+								<button class="btn small" type="submit">Move</button>
 							</form>
 						</details>
 					{/if}
@@ -2028,6 +2061,7 @@
 	}
 	.edit-form input,
 	.edit-form textarea,
+	.move-under-form select,
 	.add-row input,
 	.add-row select,
 	.paste textarea {
@@ -2040,6 +2074,27 @@
 		display: grid;
 		gap: 6px;
 		margin: 6px 0 10px;
+	}
+	.move-under-form {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		align-items: end;
+		margin: 0 0 10px;
+		padding-top: 8px;
+		border-top: 1px solid var(--border);
+	}
+	.move-under-form label {
+		display: grid;
+		gap: 4px;
+		flex: 1 1 240px;
+		font-size: 0.85rem;
+		color: var(--muted);
+	}
+	.move-under-form select {
+		width: 100%;
+		color: var(--fg);
+		background: var(--card);
 	}
 	.edit-form .dt {
 		font-size: 0.85rem;
