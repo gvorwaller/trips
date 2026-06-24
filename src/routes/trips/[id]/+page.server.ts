@@ -93,6 +93,26 @@ function asType(v: FormDataEntryValue | null): ItemType {
 	return (ITEM_TYPES as readonly string[]).includes(s) ? (s as ItemType) : 'place';
 }
 
+function optType(v: FormDataEntryValue | null): ItemType | undefined {
+	if (v === null) return undefined;
+	const s = v.toString();
+	return (ITEM_TYPES as readonly string[]).includes(s) ? (s as ItemType) : undefined;
+}
+
+function manualItineraryText(itemType: ItemType, title: string, notes: string | null) {
+	if (itemType !== 'note' || notes || title.length <= 180) return { title: title.slice(0, 500), notes };
+
+	const colon = title.indexOf(':');
+	const newline = title.search(/\r?\n/);
+	const sentence = title.search(/[.!?]\s+/);
+	const candidates = [colon, newline, sentence].filter((n) => n >= 20 && n <= 140);
+	const splitAt = candidates.length > 0 ? Math.min(...candidates) : 120;
+	const delimiterLength = splitAt === colon || splitAt === sentence ? 1 : 0;
+	const head = title.slice(0, splitAt + delimiterLength).trim();
+	const body = title.slice(splitAt + delimiterLength).trim();
+	return { title: head.slice(0, 500), notes: body || null };
+}
+
 function asOp(v: FormDataEntryValue | null): TreeOp {
 	const s = (v ?? '').toString();
 	if (s === 'move-up' || s === 'move-down' || s === 'indent' || s === 'outdent') return s;
@@ -186,10 +206,17 @@ export const actions: Actions = {
 		const form = await request.formData();
 		const title = (form.get('title') ?? '').toString().trim();
 		if (!title) return fail(400, { error: 'Title is required.' });
+		const itemType = asType(form.get('item_type'));
+		const text = manualItineraryText(
+			itemType,
+			title,
+			(form.get('notes') ?? '').toString().trim() || null
+		);
 		await createItem(tripId, {
 			parent_id: optId(form.get('parent_id')),
-			item_type: asType(form.get('item_type')),
-			title: title.slice(0, 500)
+			item_type: itemType,
+			title: text.title,
+			notes: text.notes
 		});
 		return { ok: true };
 	},
@@ -261,12 +288,18 @@ export const actions: Actions = {
 		const id = parseId(form.get('id'));
 		const title = (form.get('title') ?? '').toString().trim();
 		if (!title) return fail(400, { error: 'Title is required.' });
+		const itemType = optType(form.get('item_type'));
+		const text = manualItineraryText(
+			itemType ?? 'place',
+			title,
+			(form.get('notes') ?? '').toString().trim() || null
+		);
 		await updateItem(tripId, id, {
-			title: title.slice(0, 500),
-			notes: (form.get('notes') ?? '').toString().trim() || null,
+			title: text.title,
+			notes: text.notes,
 			external_url: (form.get('external_url') ?? '').toString().trim() || null,
 			date: (form.get('date') ?? '').toString().trim() || null,
-			item_type: asType(form.get('item_type'))
+			item_type: itemType
 		});
 		return { ok: true };
 	},

@@ -794,6 +794,11 @@
 								class="edit-form"
 							>
 								<input type="hidden" name="id" value={node.id} />
+								<select name="item_type" aria-label="type">
+									{#each ['place', 'day', 'section', 'note'] as t (t)}
+										<option value={t} selected={node.item_type === t}>{t}</option>
+									{/each}
+								</select>
 								<input name="title" value={node.title} placeholder="Title" />
 								<input
 									name="external_url"
@@ -839,6 +844,7 @@
 				<option value="note">note</option>
 			</select>
 			<input name="title" placeholder="Add a place / day / note…" required />
+			<textarea name="notes" rows="2" placeholder="Notes"></textarea>
 			<button class="btn small primary" type="submit">Add</button>
 		</form>
 		<details class="paste">
@@ -1833,7 +1839,7 @@
 	}
 	.line {
 		display: flex;
-		align-items: center;
+		align-items: flex-start;
 		gap: 8px;
 		min-height: 44px;
 		padding: 4px 0;
@@ -1887,10 +1893,13 @@
 	}
 	.ttl {
 		font-weight: 600;
+		overflow-wrap: anywhere;
 	}
 	.meta {
 		color: var(--muted);
 		font-size: 0.85rem;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
 	}
 	.done {
 		text-decoration: line-through;
@@ -2069,10 +2078,12 @@
 		padding: 2px 0;
 	}
 	.edit-form input,
+	.edit-form select,
 	.edit-form textarea,
 	.move-under-form select,
 	.add-row input,
 	.add-row select,
+	.add-row textarea,
 	.paste textarea {
 		font-size: 1rem;
 		padding: 8px 10px;
@@ -2126,6 +2137,10 @@
 	.add-row input[name='name'] {
 		flex: 1;
 		min-width: 140px;
+	}
+	.add-row textarea[name='notes'] {
+		flex: 1 0 100%;
+		min-height: 64px;
 	}
 	.qty {
 		width: 64px;
