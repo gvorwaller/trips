@@ -10,8 +10,11 @@
 		appleMapsLink,
 		googleDirectionsLink,
 		googleDayDirectionsLink,
+		googleLegByLegLinks,
+		dayPlanDirectionsLink,
 		type MapPlace
 	} from '$lib/maplinks';
+	import { haversineKm, formatKm } from '$lib/geo';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
@@ -327,6 +330,7 @@
 		data.itineraryRows.some((r) => r.node.parent_id === id);
 
 	type ItinNode = PageData['itineraryRows'][number]['node'];
+	type DayPlanStop = PageData['dayPlanStops'][number];
 	const toPlace = (n: ItinNode): MapPlace => ({
 		name: n.title,
 		lat: n.lat,
@@ -347,6 +351,165 @@
 			.filter((r) => r.node.parent_id === parentId && r.node.item_type === 'place')
 			.map((r) => toPlace(r.node));
 		return googleDayDirectionsLink(places);
+	}
+
+	function directChildPlaces(parentId: number) {
+		return data.itineraryRows.filter(
+			(r) => r.node.parent_id === parentId && r.node.item_type === 'place'
+		);
+	}
+
+	// ── Day plan builder + saved plan helpers ──
+	type BuilderStop = {
+		itinerary_item_id: number;
+		title: string;
+		notes: string;
+		lat: number | null;
+		lon: number | null;
+		place_id: string | null;
+	};
+	let dayPlanBuilderOpen = $state(false);
+	let dayPlanTitle = $state('');
+	let dayPlanDate = $state('');
+	let dayPlanNotes = $state('');
+	let dayPlanStops = $state<BuilderStop[]>([]);
+	let dayPlanAddPlaceId = $state('');
+
+	const dayPlanPlaces = $derived(data.itineraryRows.filter((r) => r.node.item_type === 'place'));
+	const dayPlanParents = $derived(
+		data.itineraryRows.filter((r) => r.node.item_type === 'day' || r.node.item_type === 'section')
+	);
+
+	function stopPlace(stop: BuilderStop): MapPlace {
+		return { name: stop.title, lat: stop.lat, lon: stop.lon, place_id: stop.place_id };
+	}
+
+	function savedStopPlace(stop: DayPlanStop): MapPlace {
+		return {
+			name: stop.snapshot_title,
+			lat: stop.snapshot_lat,
+			lon: stop.snapshot_lon,
+			place_id: stop.snapshot_place_id
+		};
+	}
+
+	function stopsForPlan(planId: number): DayPlanStop[] {
+		return data.dayPlanStops.filter((s) => s.day_plan_id === planId);
+	}
+
+	function planProgress(stops: DayPlanStop[]): string {
+		const visited = stops.filter((s) => s.visited).length;
+		return `${visited}/${stops.length} visited`;
+	}
+
+	function routeDistance(places: MapPlace[]): string | null {
+		let km = 0;
+		let legs = 0;
+		for (let i = 0; i < places.length - 1; i++) {
+			const a = places[i];
+			const b = places[i + 1];
+			if (
+				typeof a.lat === 'number' &&
+				typeof a.lon === 'number' &&
+				typeof b.lat === 'number' &&
+				typeof b.lon === 'number'
+			) {
+				km += haversineKm(a.lat, a.lon, b.lat, b.lon);
+				legs += 1;
+			}
+		}
+		return legs > 0 ? formatKm(km) : null;
+	}
+
+	const builderRoute = $derived(googleDayDirectionsLink(dayPlanStops.map(stopPlace)));
+	const builderLegs = $derived(googleLegByLegLinks(dayPlanStops.map(stopPlace)));
+	const builderDistance = $derived(routeDistance(dayPlanStops.map(stopPlace)));
+	const builderStopsJson = $derived(
+		JSON.stringify(
+			dayPlanStops.map((s) => ({
+				itinerary_item_id: s.itinerary_item_id,
+				notes: s.notes.trim() || null
+			}))
+		)
+	);
+
+	function resetDayPlanBuilder() {
+		dayPlanTitle = '';
+		dayPlanDate = '';
+		dayPlanNotes = '';
+		dayPlanStops = [];
+		dayPlanAddPlaceId = '';
+	}
+
+	function openDayPlanBuilder() {
+		resetDayPlanBuilder();
+		dayPlanBuilderOpen = true;
+	}
+
+	function addBuilderPlace(row: PageData['itineraryRows'][number]) {
+		if (dayPlanStops.some((s) => s.itinerary_item_id === row.node.id)) return;
+		dayPlanStops = [
+			...dayPlanStops,
+			{
+				itinerary_item_id: row.node.id,
+				title: row.node.title,
+				notes: '',
+				lat: row.node.lat,
+				lon: row.node.lon,
+				place_id: row.node.place_id
+			}
+		];
+	}
+
+	function addSelectedBuilderPlace() {
+		const id = Number(dayPlanAddPlaceId);
+		const row = dayPlanPlaces.find((r) => r.node.id === id);
+		if (row) addBuilderPlace(row);
+		dayPlanAddPlaceId = '';
+	}
+
+	function startDayPlanFromParent(parent: ItinNode) {
+		const rows = directChildPlaces(parent.id);
+		dayPlanTitle = parent.title;
+		dayPlanDate = parent.date ?? '';
+		dayPlanNotes = '';
+		dayPlanStops = [];
+		for (const row of rows) addBuilderPlace(row);
+		dayPlanBuilderOpen = true;
+	}
+
+	function moveBuilderStop(index: number, delta: number) {
+		const target = index + delta;
+		if (target < 0 || target >= dayPlanStops.length) return;
+		const next = [...dayPlanStops];
+		[next[index], next[target]] = [next[target], next[index]];
+		dayPlanStops = next;
+	}
+
+	function removeBuilderStop(index: number) {
+		dayPlanStops = dayPlanStops.filter((_, i) => i !== index);
+	}
+
+	async function toggleVisited(id: number, visited: boolean) {
+		const res = await fetch('/api/dayplan/visited', {
+			method: 'PATCH',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ id, visited })
+		});
+		if (res.ok) invalidateAll();
+	}
+
+	async function reorderSavedStop(planId: number, stopId: number, delta: number) {
+		const ids = stopsForPlan(planId).map((s) => s.id);
+		const index = ids.indexOf(stopId);
+		const target = index + delta;
+		if (index === -1 || target < 0 || target >= ids.length) return;
+		[ids[index], ids[target]] = [ids[target], ids[index]];
+		const fd = new FormData();
+		fd.set('plan_id', String(planId));
+		fd.set('ordered_stop_ids', JSON.stringify(ids));
+		const res = await fetch('?/dayplan-reorder', { method: 'POST', body: fd });
+		if (res.ok) invalidateAll();
 	}
 
 	function selectPin(id: number) {
@@ -681,6 +844,303 @@
 	{/each}
 {/snippet}
 
+<!-- ── DAY PLANS ─────────────────────────────────────── -->
+<div class="card dayplans-card">
+	<div class="section-header">
+		<button class="section-toggle" type="button" onclick={() => toggleSection('dayplans')}>
+			<span class="section-caret">{sectionsCollapsed.has('dayplans') ? '▸' : '▾'}</span>
+			<h2>Day Plans</h2>
+			<span class="count-badge">{data.dayPlans.length}</span>
+		</button>
+		{#if !isViewer}
+			<button class="btn small" type="button" onclick={openDayPlanBuilder}>Build day</button>
+		{/if}
+	</div>
+
+	{#if !sectionsCollapsed.has('dayplans')}
+		{#if data.dayPlans.length === 0}
+			<p class="muted">No day plans yet.</p>
+		{:else}
+			<div class="dayplan-list">
+				{#each data.dayPlans as plan (plan.id)}
+					{@const stops = stopsForPlan(plan.id)}
+					{@const directions = dayPlanDirectionsLink(stops)}
+					{@const legLinks = googleLegByLegLinks(stops.map(savedStopPlace))}
+					{@const distance = routeDistance(stops.map(savedStopPlace))}
+					<article class="dayplan-card">
+						<div class="dayplan-head">
+							<div class="grow">
+								<div class="ttl">{plan.title}</div>
+								<div class="meta">
+									{#if plan.optional_date}
+										{new Date(plan.optional_date + 'T00:00:00').toLocaleDateString(undefined, {
+											weekday: 'short',
+											month: 'short',
+											day: 'numeric'
+										})}
+										-
+									{/if}
+									{stops.length} stop{stops.length === 1 ? '' : 's'} - {planProgress(stops)}
+									{#if distance} - ~{distance}{/if}
+								</div>
+								{#if plan.notes}<div class="meta">{plan.notes}</div>{/if}
+							</div>
+							<div class="dayplan-actions">
+								{#if directions}
+									<a class="btn small primary" href={directions} target="_blank" rel="noopener"
+										>Open directions</a
+									>
+								{:else if stops.length === 1}
+									<a
+										class="btn small"
+										href={googleMapsLink(savedStopPlace(stops[0]))}
+										target="_blank"
+										rel="noopener">Open map</a
+									>
+								{/if}
+								{#if !isViewer}
+									<button
+										type="button"
+										class="del"
+										title="delete"
+										onclick={() =>
+											(pendingDelete = {
+												action: 'dayplan-delete',
+												fields: { id: plan.id },
+												heading: 'Delete this day plan?',
+												body: `"${plan.title}" and its saved route stops will be permanently removed.`,
+												confirmLabel: 'Delete'
+											})}>✕</button
+									>
+								{/if}
+							</div>
+						</div>
+
+						<details class="dayplan-details">
+							<summary>Stops</summary>
+							{#if stops.length === 0}
+								<p class="muted">No stops saved.</p>
+							{:else}
+								<ol class="dayplan-stops">
+									{#each stops as stop, i (stop.id)}
+										<li>
+											<div class="dayplan-stop-row">
+												<label class="dayplan-visited">
+													<input
+														type="checkbox"
+														checked={stop.visited}
+														onchange={(e) => toggleVisited(stop.id, e.currentTarget.checked)}
+													/>
+													<span class:done={stop.visited}>{stop.snapshot_title}</span>
+												</label>
+												<div class="dayplan-stop-links">
+													<a
+														class="chip-link"
+														href={googleMapsLink(savedStopPlace(stop))}
+														target="_blank"
+														rel="noopener">Google</a
+													>
+													{#if !isViewer}
+														<button
+															type="button"
+															title="move up"
+															disabled={i === 0}
+															onclick={() => reorderSavedStop(plan.id, stop.id, -1)}>↑</button
+														>
+														<button
+															type="button"
+															title="move down"
+															disabled={i === stops.length - 1}
+															onclick={() => reorderSavedStop(plan.id, stop.id, 1)}>↓</button
+														>
+														<form method="POST" action="?/dayplan-remove-stop" use:enhance class="inline">
+															<input type="hidden" name="id" value={stop.id} />
+															<button type="submit" class="del">Remove</button>
+														</form>
+													{/if}
+												</div>
+											</div>
+											{#if stop.notes}<div class="meta dayplan-stop-note">{stop.notes}</div>{/if}
+											{#if !isViewer}
+												<form
+													method="POST"
+													action="?/dayplan-stop-notes"
+													use:enhance={() => {
+														return async ({ update }) => {
+															await update({ reset: false });
+														};
+													}}
+													class="dayplan-note-form"
+												>
+													<input type="hidden" name="id" value={stop.id} />
+													<input name="notes" value={stop.notes ?? ''} placeholder="Stop note" />
+													<button class="btn small" type="submit">Save</button>
+												</form>
+											{/if}
+										</li>
+									{/each}
+								</ol>
+							{/if}
+
+							{#if legLinks}
+								<div class="leg-links">
+									{#each legLinks as leg, i}
+										<a class="chip-link route" href={leg.url} target="_blank" rel="noopener">
+											Leg {i + 1}: {leg.from} to {leg.to}
+										</a>
+									{/each}
+								</div>
+							{/if}
+
+							{#if !isViewer}
+								<details class="edit">
+									<summary>edit plan</summary>
+									<form method="POST" action="?/dayplan-edit" use:enhance class="edit-form">
+										<input type="hidden" name="id" value={plan.id} />
+										<input name="title" value={plan.title} placeholder="Title" required />
+										<input name="optional_date" type="date" value={plan.optional_date ?? ''} />
+										<textarea name="notes" rows="2" placeholder="Notes">{plan.notes ?? ''}</textarea>
+										<button class="btn small primary" type="submit">Save</button>
+									</form>
+								</details>
+								<form method="POST" action="?/dayplan-add-stop" use:enhance class="add-row">
+									<input type="hidden" name="plan_id" value={plan.id} />
+									<select name="itinerary_item_id" required aria-label="place">
+										<option value="">Add a place...</option>
+										{#each dayPlanPlaces as { node, depth } (node.id)}
+											<option value={node.id}>{'· '.repeat(depth)}{node.title}</option>
+										{/each}
+									</select>
+									<input name="notes" placeholder="Stop note" />
+									<button class="btn small" type="submit">Add stop</button>
+								</form>
+							{/if}
+						</details>
+					</article>
+				{/each}
+			</div>
+		{/if}
+
+		{#if !isViewer && dayPlanBuilderOpen}
+			<form
+				method="POST"
+				action="?/dayplan-create"
+				class="dayplan-builder"
+				use:enhance={() => {
+					return async ({ result, update }) => {
+						if (result.type === 'success') {
+							resetDayPlanBuilder();
+							dayPlanBuilderOpen = false;
+						}
+						await update();
+					};
+				}}
+			>
+				<input type="hidden" name="stops" value={builderStopsJson} />
+				<div class="form-row">
+					<input name="title" placeholder="Title (required)" required bind:value={dayPlanTitle} />
+					<input name="optional_date" type="date" bind:value={dayPlanDate} />
+				</div>
+				<textarea name="notes" rows="2" placeholder="Plan notes" bind:value={dayPlanNotes}></textarea>
+
+				<div class="dayplan-picker">
+					<select bind:value={dayPlanAddPlaceId} aria-label="place">
+						<option value="">Choose a place...</option>
+						{#each dayPlanPlaces as { node, depth } (node.id)}
+							<option
+								value={String(node.id)}
+								disabled={dayPlanStops.some((s) => s.itinerary_item_id === node.id)}
+							>
+								{'· '.repeat(depth)}{node.title}
+							</option>
+						{/each}
+					</select>
+					<button
+						class="btn small"
+						type="button"
+						onclick={addSelectedBuilderPlace}
+						disabled={!dayPlanAddPlaceId}
+					>
+						Add place
+					</button>
+				</div>
+				{#if dayPlanParents.length > 0}
+					<div class="quick-groups">
+						{#each dayPlanParents as { node } (node.id)}
+							{#if directChildPlaces(node.id).length > 0}
+								<button class="chip-action" type="button" onclick={() => startDayPlanFromParent(node)}>
+									{node.title}
+								</button>
+							{/if}
+						{/each}
+					</div>
+				{/if}
+
+				{#if dayPlanStops.length > 0}
+					<ol class="builder-stops">
+						{#each dayPlanStops as stop, i (stop.itinerary_item_id)}
+							<li>
+								<span class="ttl">{stop.title}</span>
+								<input bind:value={stop.notes} placeholder="Stop note" />
+								<div class="builder-controls">
+									<button
+										type="button"
+										title="move up"
+										disabled={i === 0}
+										onclick={() => moveBuilderStop(i, -1)}>↑</button
+									>
+									<button
+										type="button"
+										title="move down"
+										disabled={i === dayPlanStops.length - 1}
+										onclick={() => moveBuilderStop(i, 1)}>↓</button
+									>
+									<button type="button" class="del" onclick={() => removeBuilderStop(i)}>Remove</button>
+								</div>
+							</li>
+						{/each}
+					</ol>
+					<div class="dayplan-preview">
+						<span>{dayPlanStops.length} stop{dayPlanStops.length === 1 ? '' : 's'}</span>
+						{#if builderDistance}<span>~{builderDistance}</span>{/if}
+						{#if builderRoute}
+							<a class="chip-link route" href={builderRoute} target="_blank" rel="noopener"
+								>Open as one route</a
+							>
+						{/if}
+						{#if builderLegs}
+							{#each builderLegs as leg, i}
+								<a class="chip-link" href={leg.url} target="_blank" rel="noopener">
+									Leg {i + 1}
+								</a>
+							{/each}
+						{/if}
+					</div>
+				{/if}
+				<div class="cand-actions">
+					<button
+						class="btn small primary"
+						type="submit"
+						disabled={!dayPlanTitle.trim() || dayPlanStops.length === 0}
+					>
+						Save day
+					</button>
+					<button
+						class="btn small"
+						type="button"
+						onclick={() => {
+							resetDayPlanBuilder();
+							dayPlanBuilderOpen = false;
+						}}
+					>
+						Cancel
+					</button>
+				</div>
+			</form>
+		{/if}
+	{/if}
+</div>
+
 <!-- ── PLACES ─────────────────────────────────────────── -->
 <div class="card">
 	<button class="section-toggle" type="button" onclick={() => toggleSection('places')}>
@@ -756,7 +1216,14 @@
 								{/if}
 								{#if route}
 									<a class="chip-link route" href={route} target="_blank" rel="noopener"
-										>Directions for the day</a
+										>Route this group</a
+									>
+								{/if}
+								{#if !isViewer && (node.item_type === 'day' || node.item_type === 'section') && directChildPlaces(node.id).length > 0}
+									<button
+										class="chip-action"
+										type="button"
+										onclick={() => startDayPlanFromParent(node)}>Day plan</button
 									>
 								{/if}
 								{#if node.external_url}
@@ -1937,6 +2404,20 @@
 		border: 1px solid var(--border);
 		color: var(--muted);
 	}
+	.chip-action {
+		font: inherit;
+		font-size: 0.78rem;
+		padding: 3px 9px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--card);
+		color: var(--link);
+		text-decoration: none;
+		min-height: 28px;
+		display: inline-flex;
+		align-items: center;
+		cursor: pointer;
+	}
 	li.flash {
 		animation: flash 1.4s ease-out;
 	}
@@ -2071,7 +2552,8 @@
 		border: 0;
 	}
 	.edit summary,
-	.paste summary {
+	.paste summary,
+	.dayplan-details summary {
 		cursor: pointer;
 		color: var(--link);
 		font-size: 0.8rem;
@@ -2084,6 +2566,10 @@
 	.add-row input,
 	.add-row select,
 	.add-row textarea,
+	.dayplan-builder input,
+	.dayplan-builder select,
+	.dayplan-builder textarea,
+	.dayplan-note-form input,
 	.paste textarea {
 		font-size: 1rem;
 		padding: 8px 10px;
@@ -2227,6 +2713,152 @@
 	}
 	.packing-print-btn {
 		flex-shrink: 0;
+	}
+	.count-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 24px;
+		height: 24px;
+		padding: 0 7px;
+		border-radius: 999px;
+		background: var(--accent-soft);
+		color: var(--accent);
+		font-size: 0.78rem;
+		font-weight: 700;
+	}
+	/* ── Day plans ── */
+	.dayplans-card .section-header {
+		margin-bottom: 8px;
+	}
+	.dayplan-list {
+		display: grid;
+		gap: 10px;
+	}
+	.dayplan-card {
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 12px;
+		background: var(--card);
+	}
+	.dayplan-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 10px;
+	}
+	.dayplan-actions {
+		display: flex;
+		align-items: flex-start;
+		gap: 6px;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+	.dayplan-details {
+		margin-top: 8px;
+	}
+	.dayplan-stops,
+	.builder-stops {
+		margin: 8px 0 0 1.4rem;
+		padding: 0;
+	}
+	.dayplan-stops li,
+	.builder-stops li {
+		padding: 8px 0;
+		border-top: 1px solid var(--border);
+	}
+	.dayplan-stops li:first-child,
+	.builder-stops li:first-child {
+		border-top: none;
+	}
+	.dayplan-stop-row {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 8px;
+	}
+	.dayplan-visited {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		flex: 1;
+		min-width: 0;
+	}
+	.dayplan-visited input {
+		width: 22px;
+		height: 22px;
+		flex-shrink: 0;
+		margin-top: 1px;
+	}
+	.dayplan-stop-links,
+	.builder-controls {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		flex-wrap: wrap;
+		justify-content: flex-end;
+	}
+	.dayplan-stop-links button,
+	.builder-controls button {
+		border: 1px solid var(--border);
+		background: var(--card);
+		border-radius: 6px;
+		min-width: 30px;
+		min-height: 32px;
+		color: var(--muted);
+	}
+	.dayplan-stop-links button:disabled,
+	.builder-controls button:disabled {
+		opacity: 0.45;
+	}
+	.dayplan-stop-note {
+		padding-left: 30px;
+	}
+	.dayplan-note-form {
+		display: flex;
+		gap: 6px;
+		margin: 6px 0 0 30px;
+	}
+	.dayplan-note-form input {
+		flex: 1;
+		min-width: 120px;
+	}
+	.leg-links,
+	.dayplan-preview,
+	.quick-groups {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-top: 8px;
+		align-items: center;
+	}
+	.dayplan-builder {
+		display: grid;
+		gap: 8px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 12px;
+		margin-top: 12px;
+		background: var(--bg);
+	}
+	.dayplan-builder textarea {
+		width: 100%;
+	}
+	.dayplan-picker {
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+	.dayplan-picker select {
+		flex: 1 1 220px;
+	}
+	.builder-stops input {
+		width: 100%;
+		margin-top: 6px;
+	}
+	.builder-stops li {
+		display: grid;
+		gap: 4px;
 	}
 	/* ── Packing row: wrap controls below text on mobile ── */
 	.pack-line {
@@ -2532,12 +3164,49 @@
 		border-top: 1px solid rgba(0, 0, 0, 0.08);
 	}
 	@media (max-width: 639px) {
+		.dayplan-head,
+		.dayplan-stop-row {
+			flex-direction: column;
+		}
+		.dayplan-actions,
+		.dayplan-stop-links {
+			justify-content: flex-start;
+		}
+		.dayplan-note-form {
+			margin-left: 0;
+			flex-wrap: wrap;
+		}
 		.exp-controls {
 			width: 100%;
 			padding-top: 4px;
 		}
 		.form-row {
 			flex-wrap: wrap;
+		}
+	}
+	@media print {
+		.dayplan-actions,
+		.dayplan-stop-links,
+		.dayplan-note-form,
+		.dayplan-builder,
+		.dayplan-visited input,
+		.leg-links {
+			display: none !important;
+		}
+		.dayplan-card {
+			border: none;
+			padding: 0;
+			break-inside: avoid;
+		}
+		.dayplan-details {
+			display: block;
+		}
+		.dayplan-details summary {
+			display: none;
+		}
+		.dayplan-stops li {
+			padding: 1pt 0;
+			border-top: none;
 		}
 	}
 </style>

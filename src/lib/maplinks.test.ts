@@ -3,7 +3,9 @@ import {
 	googleMapsLink,
 	appleMapsLink,
 	googleDirectionsLink,
-	googleDayDirectionsLink
+	googleDayDirectionsLink,
+	googleLegByLegLinks,
+	dayPlanDirectionsLink
 } from './maplinks';
 
 describe('googleMapsLink', () => {
@@ -74,5 +76,45 @@ describe('googleDayDirectionsLink', () => {
 		expect(u).toContain('origin=Start');
 		expect(u).toContain('destination=9%2C9');
 		expect(u).not.toContain('waypoints=');
+	});
+});
+
+describe('googleLegByLegLinks', () => {
+	it('returns one link per consecutive pair', () => {
+		const legs = googleLegByLegLinks([
+			{ name: 'A', lat: 1, lon: 1 },
+			{ name: 'B' },
+			{ name: 'C', lat: 3, lon: 3 }
+		]);
+		expect(legs).toHaveLength(2);
+		expect(legs?.[0].from).toBe('A');
+		expect(legs?.[0].to).toBe('B');
+		expect(legs?.[0].url).toContain('origin=1%2C1');
+		expect(legs?.[0].url).toContain('destination=B');
+		expect(legs?.[1].url).toContain('destination=3%2C3');
+	});
+	it('returns null for fewer than two usable places', () => {
+		expect(googleLegByLegLinks([{ name: 'A' }])).toBeNull();
+	});
+});
+
+describe('dayPlanDirectionsLink', () => {
+	it('uses snapshot fields for route links', () => {
+		const u = dayPlanDirectionsLink([
+			{
+				snapshot_title: 'Start',
+				snapshot_lat: null,
+				snapshot_lon: null,
+				snapshot_place_id: null
+			},
+			{
+				snapshot_title: 'End',
+				snapshot_lat: 4,
+				snapshot_lon: 5,
+				snapshot_place_id: null
+			}
+		]) as string;
+		expect(u).toContain('origin=Start');
+		expect(u).toContain('destination=4%2C5');
 	});
 });

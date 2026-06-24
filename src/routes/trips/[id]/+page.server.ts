@@ -60,6 +60,18 @@ import {
 	extractExpensesFromDocument
 } from '$server/expense-extract';
 import {
+	listDayPlans,
+	listStopsForTrip,
+	createDayPlan,
+	updateDayPlan,
+	deleteDayPlan,
+	addStop,
+	removeStop,
+	reorderStops,
+	updateStopNotes,
+	type StopInput
+} from '$server/dayplans';
+import {
 	extractItineraryFromText,
 	type ExtractedItineraryItem
 } from '$server/itinerary-extract';
@@ -99,6 +111,51 @@ function optType(v: FormDataEntryValue | null): ItemType | undefined {
 	return (ITEM_TYPES as readonly string[]).includes(s) ? (s as ItemType) : undefined;
 }
 
+function cleanText(v: FormDataEntryValue | null): string | null {
+	return (v ?? '').toString().trim() || null;
+}
+
+function optDate(v: FormDataEntryValue | null): string | null {
+	const s = (v ?? '').toString().trim();
+	return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+function parseStopInputs(raw: string | undefined): StopInput[] {
+	if (!raw) return [];
+	let data: unknown;
+	try {
+		data = JSON.parse(raw);
+	} catch {
+		throw error(400, 'Invalid day plan stops.');
+	}
+	if (!Array.isArray(data)) throw error(400, 'Invalid day plan stops.');
+	return data
+		.map((item) => {
+			if (!item || typeof item !== 'object') return null;
+			const candidate = item as { itinerary_item_id?: unknown; notes?: unknown };
+			const id = Number(candidate.itinerary_item_id);
+			if (!Number.isInteger(id) || id <= 0) return null;
+			const notes =
+				typeof candidate.notes === 'string' && candidate.notes.trim()
+					? candidate.notes.trim().slice(0, 2000)
+					: null;
+			return { itinerary_item_id: id, notes };
+		})
+		.filter((item): item is StopInput => item !== null);
+}
+
+function parseIdArray(raw: string | undefined): number[] {
+	if (!raw) return [];
+	let data: unknown;
+	try {
+		data = JSON.parse(raw);
+	} catch {
+		throw error(400, 'Invalid stop order.');
+	}
+	if (!Array.isArray(data)) throw error(400, 'Invalid stop order.');
+	return data.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+}
+
 function manualItineraryText(itemType: ItemType, title: string, notes: string | null) {
 	if (itemType !== 'note' || notes || title.length <= 180) return { title: title.slice(0, 500), notes };
 
@@ -127,7 +184,17 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	const trip = await getTrip(ownerId, tripId);
 	if (!trip) throw error(404, 'Trip not found');
 
-	const [itinerary, lists, itemsByList, templates, reservations, attachments, expenses] =
+	const [
+		itinerary,
+		lists,
+		itemsByList,
+		templates,
+		reservations,
+		attachments,
+		expenses,
+		dayPlans,
+		dayPlanStops
+	] =
 		await Promise.all([
 			listItinerary(tripId),
 			listPackingLists(tripId),
@@ -135,7 +202,9 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 			listTemplates(ownerId),
 			listReservations(tripId),
 			listAttachmentsForTrip(tripId),
-			listExpenses(tripId)
+			listExpenses(tripId),
+			listDayPlans(tripId),
+			listStopsForTrip(tripId)
 		]);
 
 	const itineraryRows = flattenTree(itinerary);
@@ -149,7 +218,17 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		const checked = leaves.filter((i) => i.checked).length;
 		return { list, rows: flattenTree(items), total: leaves.length, checked };
 	});
-	return { trip, itineraryRows, packing, templates, reservations, attachments, expenses };
+	return {
+		trip,
+		itineraryRows,
+		packing,
+		templates,
+		reservations,
+		attachments,
+		expenses,
+		dayPlans,
+		dayPlanStops
+	};
 };
 
 /** Resolve trip and assert ownership for an action; returns {ownerId, tripId}. */
@@ -337,6 +416,88 @@ export const actions: Actions = {
 			Number.MAX_SAFE_INTEGER
 		);
 		return { ok, moved: ok };
+	},
+
+	// ── Day plans ─────────────────────────────────────────
+	'dayplan-create': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const title = (form.get('title') ?? '').toString().trim();
+		if (!title) return fail(400, { error: 'Title is required.' });
+		const stops = parseStopInputs(form.get('stops')?.toString());
+		const planId = await createDayPlan(tripId, {
+			title: title.slice(0, 300),
+			notes: cleanText(form.get('notes')),
+			optional_date: optDate(form.get('optional_date')),
+			stops
+		});
+		return { ok: true, planId };
+	},
+
+	'dayplan-edit': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const title = (form.get('title') ?? '').toString().trim();
+		if (!title) return fail(400, { error: 'Title is required.' });
+		const ok = await updateDayPlan(tripId, parseId(form.get('id')), {
+			title: title.slice(0, 300),
+			notes: cleanText(form.get('notes')),
+			optional_date: optDate(form.get('optional_date'))
+		});
+		if (!ok) throw error(404, 'Day plan not found');
+		return { ok: true };
+	},
+
+	'dayplan-delete': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		await deleteDayPlan(tripId, parseId(form.get('id')));
+		return { ok: true };
+	},
+
+	'dayplan-add-stop': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const stopId = await addStop(tripId, parseId(form.get('plan_id')), {
+			itinerary_item_id: parseId(form.get('itinerary_item_id')),
+			notes: cleanText(form.get('notes'))
+		});
+		if (stopId === null) throw error(404, 'Day plan or place not found');
+		return { ok: true, stopId };
+	},
+
+	'dayplan-remove-stop': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		await removeStop(tripId, parseId(form.get('id')));
+		return { ok: true };
+	},
+
+	'dayplan-reorder': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const ok = await reorderStops(
+			tripId,
+			parseId(form.get('plan_id')),
+			parseIdArray(form.get('ordered_stop_ids')?.toString())
+		);
+		if (!ok) return fail(400, { error: 'Invalid stop order.' });
+		return { ok: true };
+	},
+
+	'dayplan-stop-notes': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const ok = await updateStopNotes(tripId, parseId(form.get('id')), cleanText(form.get('notes')));
+		if (!ok) throw error(404, 'Stop not found');
+		return { ok: true };
 	},
 
 	// ── Packing lists ──────────────────────────────────────

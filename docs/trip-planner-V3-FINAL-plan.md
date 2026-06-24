@@ -18,7 +18,7 @@ A private, fast, delightful trip-reference web app for one owner + one read-only
 ## 2. Locked decisions (this supersedes any ambiguity in V1/V2)
 
 1. **Attachments = app-proxied private downloads.** Objects stored with private ACL; every download streams through an authenticated SvelteKit route (no public CDN URL, no signed URL). The shared gaylonphotos bucket is public-only, so trips uses private-ACL objects (own bucket or private prefix) + a download proxy.
-2. **Viewer (wife) is read-only EXCEPT may toggle packing-item checked state.** One explicit allow in the auth guard; everything else returns 403 for viewer.
+2. **Viewer (wife) is read-only EXCEPT may toggle packing-item checked state and day-plan visited state.** Explicit allows in the auth guard; everything else returns 403 for viewer.
 3. **Roles = `owner` + `viewer`** (DB CHECK, hooks, UI all consistent). Note: birds uses `'admin'|'viewer'` — the copied guard logic changes the role string only.
 4. **UX features in core scope:** templates & duplicate-trip, offline current-trip PWA, one-tap Google/Apple directions, global search.
 5. **Confirmed infrastructure (verified against sibling repos):**
@@ -78,7 +78,7 @@ Timezone rule: itinerary day grouping = `DATE` (no tz); reservation instants = `
 ## 5. Security notes
 
 - Same-origin check on all mutating requests (POST/PUT/PATCH/DELETE) in addition to role guard.
-- Viewer allow-list: only `PATCH /trips/[id]/packing/[itemId]/checked` (checked-state toggle only); server verifies no other field changed. All else 403 for viewer.
+- Viewer allow-list: packing checked-state toggle and day-plan visited toggle only; server verifies no other field changed. All else 403 for viewer.
 - Attachment download proxy verifies session + trip ownership/viewer before streaming; no object key is ever exposed to the client.
 - URL-unfurl is an SSRF surface: server-side fetch only, ~3s timeout, max response size, block private/loopback/link-local IPs and non-http(s) schemes, parse OG/`<title>` only. MVP may ship "store labeled link" first and add title fetch later.
 - Never log secrets, session tokens, Spaces keys, Maps keys, or object keys. No synthetic/fallback data — empty states for missing data. Validate at boundaries (routes); trust internal code.

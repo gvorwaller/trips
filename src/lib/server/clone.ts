@@ -103,6 +103,49 @@ export async function duplicateTrip(ownerId: number, tripId: number): Promise<nu
 			);
 		}
 
+		// Day plans + stops. Stop visited state resets for a fresh copy, like packing checks.
+		const plans = await client.query(
+			`SELECT id, title, notes, optional_date FROM day_plans WHERE trip_id = $1 ORDER BY id`,
+			[tripId]
+		);
+		for (const plan of plans.rows) {
+			const newPlan = await client.query<{ id: number }>(
+				`INSERT INTO day_plans (trip_id, title, notes, optional_date)
+				 VALUES ($1,$2,$3,$4)
+				 RETURNING id`,
+				[newTripId, plan.title, plan.notes, plan.optional_date]
+			);
+			const stops = await client.query(
+				`SELECT itinerary_item_id, sort_order, notes, snapshot_title,
+				        snapshot_lat, snapshot_lon, snapshot_place_id
+				   FROM day_plan_stops
+				  WHERE day_plan_id = $1
+				  ORDER BY sort_order, id`,
+				[plan.id]
+			);
+			for (const s of stops.rows) {
+				const remappedItemId = s.itinerary_item_id
+					? (itinMap.get(s.itinerary_item_id) ?? null)
+					: null;
+				await client.query(
+					`INSERT INTO day_plan_stops
+					   (day_plan_id, itinerary_item_id, sort_order, notes, visited,
+					    snapshot_title, snapshot_lat, snapshot_lon, snapshot_place_id)
+					 VALUES ($1,$2,$3,$4,FALSE,$5,$6,$7,$8)`,
+					[
+						newPlan.rows[0].id,
+						remappedItemId,
+						s.sort_order,
+						s.notes,
+						s.snapshot_title,
+						s.snapshot_lat,
+						s.snapshot_lon,
+						s.snapshot_place_id
+					]
+				);
+			}
+		}
+
 		return newTripId;
 	});
 }

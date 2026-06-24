@@ -21,12 +21,15 @@ function isPublic(path: string): boolean {
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
- * The ONE write a read-only viewer is permitted: toggling a packing item's
- * checked state, so a couple can pack together. Everything else is 403 for
- * viewers. The endpoint itself must verify that only `checked` changed.
+ * Narrow writes a read-only viewer is permitted: toggling a packing item's
+ * checked state, and marking a day-plan stop visited. Everything else is 403
+ * for viewers. Each endpoint verifies that only the allowed boolean changes.
  */
 function isViewerAllowedMutation(method: string, path: string): boolean {
-	return method === 'PATCH' && path === '/api/packing/check';
+	return (
+		method === 'PATCH' &&
+		(path === '/api/packing/check' || path === '/api/dayplan/visited')
+	);
 }
 
 export const handle: Handle = async ({ event, resolve }) => {

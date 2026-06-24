@@ -23,7 +23,7 @@
 		</li>
 		<li>
 			<strong>day</strong> — a dated header you hang places under. When it has child places it shows
-			a <em>“Directions for the day”</em> multi-stop route through them in order.
+			a <em>“Route this group”</em> multi-stop route through them in order.
 		</li>
 		<li><strong>section</strong> — same as a day but not tied to a date (e.g. “Restaurants”).</li>
 		<li><strong>note</strong> — free text; no map or links (but can carry a Reference URL via edit).</li>
@@ -40,6 +40,18 @@
 		It extracts candidate places/notes, flags likely duplicates, and lets you review/edit before
 		anything is saved. For best organization, choose an existing day or section in
 		<strong>Import under</strong>; top-level import is still available.
+	</p>
+
+	<h2>Day Plans</h2>
+	<p>
+		Use <strong>Day Plans</strong> to save a route through places already in the itinerary without
+		moving or duplicating those places. Build one from scratch, or start from a day or section in
+		Places.
+	</p>
+	<p>
+		Each plan keeps ordered stops, per-stop notes, one-route directions, leg-by-leg links, and
+		visited checkboxes. Viewers can see plans and mark stops visited, but only the owner can
+		create, edit, reorder, or delete them.
 	</p>
 
 	<h2>Packing</h2>
@@ -95,8 +107,9 @@
 		on both the itinerary and packing lists, and your folded state is remembered on this device.
 	</p>
 	<p>
-		The four main sections (Places, Packing, Reservations, Documents) also collapse — tap the
-		section heading to toggle. Section collapse state is remembered per trip on this device.
+		The main sections (Day Plans, Places, Packing, Reservations, Documents, Expenses) also
+		collapse — tap the section heading to toggle. Section collapse state is remembered per trip
+		on this device.
 	</p>
 
 	<h2>Documents</h2>
@@ -127,8 +140,8 @@
 	<h2>Owner vs. viewer</h2>
 	<p>
 		The <strong>owner</strong> can edit everything. A <strong>viewer</strong> sees a read-only copy
-		and can do exactly one thing: check packing items on or off. Manage the viewer account and
-		passwords under <strong>Settings</strong>.
+		and can check packing items on or off and mark day-plan stops visited. Manage the viewer
+		account and passwords under <strong>Settings</strong>.
 	</p>
 </div>
 

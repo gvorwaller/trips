@@ -10,6 +10,13 @@ export interface MapPlace {
 	place_id?: string | null;
 }
 
+export interface DayPlanDirectionStop {
+	snapshot_title: string;
+	snapshot_lat: number | null;
+	snapshot_lon: number | null;
+	snapshot_place_id: string | null;
+}
+
 function hasCoords(p: MapPlace): p is MapPlace & { lat: number; lon: number } {
 	return typeof p.lat === 'number' && typeof p.lon === 'number';
 }
@@ -74,4 +81,35 @@ export function googleDayDirectionsLink(places: MapPlace[]): string | null {
 		params.set('waypoints', waypoints.map(waypointToken).join('|'));
 	}
 	return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
+/** Leg-by-leg directions links for consecutive pairs in an ordered route. */
+export function googleLegByLegLinks(
+	places: MapPlace[]
+): Array<{ from: string; to: string; url: string }> | null {
+	const usable = places.filter((p) => p.name || hasCoords(p));
+	if (usable.length < 2) return null;
+	return usable.slice(0, -1).map((from, i) => {
+		const to = usable[i + 1];
+		const params = new URLSearchParams({ api: '1' });
+		params.set('origin', waypointToken(from));
+		params.set('destination', waypointToken(to));
+		return {
+			from: from.name || waypointToken(from),
+			to: to.name || waypointToken(to),
+			url: `https://www.google.com/maps/dir/?${params.toString()}`
+		};
+	});
+}
+
+/** Day-plan directions using captured snapshot fields, robust to deleted places. */
+export function dayPlanDirectionsLink(stops: DayPlanDirectionStop[]): string | null {
+	return googleDayDirectionsLink(
+		stops.map((s) => ({
+			name: s.snapshot_title,
+			lat: s.snapshot_lat,
+			lon: s.snapshot_lon,
+			place_id: s.snapshot_place_id
+		}))
+	);
 }

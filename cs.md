@@ -47,7 +47,7 @@ Five apps share RAM/disk/CPU. Keep `max_memory_restart` modest. Headless-PDF (if
 ## Auth & Roles
 - `argon2id` hashes, `sessions` table, 30-day httpOnly `sameSite=strict` cookie (`secure` in prod), sliding expiry. `locals.user` + `locals.ownerId`.
 - Roles: `owner` (full) and `viewer` (read-only) — `users.role CHECK IN ('owner','viewer')`.
-- **Viewer write exception**: the ONLY mutation a viewer may make is toggling a packing item's `checked` state (`PATCH /api/packing/check`); the endpoint must verify nothing else changed. Everything else → 403.
+- **Viewer write exceptions**: viewers may toggle a packing item's `checked` state (`PATCH /api/packing/check`) and a day-plan stop's `visited` state (`PATCH /api/dayplan/visited`); each endpoint must verify nothing else changed. Everything else → 403.
 - Same-origin check on all POST/PUT/PATCH/DELETE (defense-in-depth beyond `sameSite`).
 - Never log secrets, session tokens, Spaces keys, Maps keys, or object keys.
 
