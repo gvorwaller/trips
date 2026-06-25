@@ -1,10 +1,13 @@
+import { randomBytes } from 'node:crypto';
 import { withTransaction } from '$lib/db';
 import { orderParentsFirst } from './tree';
+import { copyObject, storageConfigured } from './storage';
 
 /**
  * Deep-copy a trip owned by `ownerId`: trip row + itinerary tree + packing
- * lists and their item trees. Returns the new trip id, or null if not owned.
- * Checked state is reset (a fresh trip starts unpacked).
+ * lists + expenses + day plans + reservations + attachments/documents.
+ * File attachments get a new S3 object copy. Checked/visited state is reset.
+ * Returns the new trip id, or null if not owned.
  */
 export async function duplicateTrip(ownerId: number, tripId: number): Promise<number | null> {
 	return withTransaction(async (client) => {
@@ -144,6 +147,61 @@ export async function duplicateTrip(ownerId: number, tripId: number): Promise<nu
 					]
 				);
 			}
+		}
+
+		// Reservations
+		const reservations = await client.query(
+			`SELECT id, reservation_type, title, confirmation_code, status,
+			        start_at, end_at, details, notes, sort_order
+			   FROM reservations WHERE trip_id = $1`,
+			[tripId]
+		);
+		const resMap = new Map<number, number>();
+		for (const r of reservations.rows) {
+			const ins = await client.query<{ id: number }>(
+				`INSERT INTO reservations
+				   (trip_id, reservation_type, title, confirmation_code, status,
+				    start_at, end_at, details, notes, sort_order)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+				[
+					newTripId, r.reservation_type, r.title, r.confirmation_code,
+					r.status, r.start_at, r.end_at, r.details, r.notes, r.sort_order
+				]
+			);
+			resMap.set(r.id, ins.rows[0].id);
+		}
+
+		// Attachments (files get a new S3 copy; text docs are just row copies)
+		const attachments = await client.query(
+			`SELECT id, reservation_id, itinerary_item_id, packing_item_id,
+			        original_name, display_name, mime_type, size_bytes,
+			        object_key, kind, text_content, meta, status
+			   FROM attachments WHERE trip_id = $1`,
+			[tripId]
+		);
+		const canCopyFiles = storageConfigured();
+		for (const a of attachments.rows) {
+			const newResId = a.reservation_id ? (resMap.get(a.reservation_id) ?? null) : null;
+			const newItinId = a.itinerary_item_id ? (itinMap.get(a.itinerary_item_id) ?? null) : null;
+
+			let newObjectKey = a.object_key;
+			if (a.kind === 'file' && a.object_key && canCopyFiles) {
+				newObjectKey = `trips/${newTripId}/${randomBytes(8).toString('hex')}/${a.original_name}`;
+				await copyObject(a.object_key, newObjectKey);
+			}
+
+			await client.query(
+				`INSERT INTO attachments
+				   (trip_id, reservation_id, itinerary_item_id, packing_item_id,
+				    original_name, display_name, mime_type, size_bytes,
+				    object_key, kind, text_content, meta, status)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+				[
+					newTripId, newResId, newItinId, null,
+					a.original_name, a.display_name, a.mime_type, a.size_bytes,
+					newObjectKey, a.kind, a.text_content, a.meta, a.status
+				]
+			);
 		}
 
 		return newTripId;

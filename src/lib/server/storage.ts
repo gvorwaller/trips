@@ -8,7 +8,8 @@ import {
 	S3Client,
 	PutObjectCommand,
 	GetObjectCommand,
-	DeleteObjectCommand
+	DeleteObjectCommand,
+	CopyObjectCommand
 } from '@aws-sdk/client-s3';
 import { env } from '$env/dynamic/private';
 
@@ -66,6 +67,18 @@ export async function getObject(key: string): Promise<FetchedObject> {
 
 export async function deleteObject(key: string): Promise<void> {
 	await getClient().send(new DeleteObjectCommand({ Bucket: BUCKET(), Key: key }));
+}
+
+export async function copyObject(srcKey: string, destKey: string): Promise<void> {
+	const bucket = BUCKET();
+	await getClient().send(
+		new CopyObjectCommand({
+			Bucket: bucket,
+			CopySource: `${bucket}/${srcKey}`,
+			Key: destKey,
+			ACL: 'private'
+		})
+	);
 }
 
 /** Fetch an object fully into memory (for LLM vision input, not streaming). */
