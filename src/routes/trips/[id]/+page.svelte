@@ -229,6 +229,7 @@
 	let itinUrlExtracting = $state(false);
 	let itinUrlMsg = $state('');
 	let itinImageFile = $state<File | null>(null);
+	let itinImagePasted = $state(false);
 	let itinImageExtracting = $state(false);
 	let itinImageMsg = $state('');
 	const itinImportParents = $derived(
@@ -1417,10 +1418,40 @@
 				{#if itinUrlMsg}<p class="extract-msg">{itinUrlMsg}</p>{/if}
 			</div>
 		</details>
-		<details class="paste">
+		<details
+			class="paste"
+			ontoggle={(e) => {
+				if ((e.currentTarget as HTMLDetailsElement).open) {
+					const zone = (e.currentTarget as HTMLElement).querySelector('.photo-drop') as HTMLElement | null;
+					zone?.focus();
+				}
+			}}
+		>
 			<summary>Import from photo</summary>
-			<div class="extract">
-				<p class="extract-head">Upload a photo and the AI will identify the place.</p>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div
+				class="extract photo-drop"
+				tabindex="-1"
+				onpaste={(e) => {
+					const items = e.clipboardData?.items;
+					if (!items) return;
+					for (const item of items) {
+						if (item.type.startsWith('image/')) {
+							e.preventDefault();
+							const file = item.getAsFile();
+							if (!file) return;
+							itinImageFile = file;
+							itinImagePasted = true;
+							const dt = new DataTransfer();
+							dt.items.add(file);
+							const input = (e.currentTarget as HTMLElement).querySelector('input[type="file"]') as HTMLInputElement | null;
+							if (input) input.files = dt.files;
+							return;
+						}
+					}
+				}}
+			>
+				<p class="extract-head">Upload or paste (⌘V) a photo and the AI will identify the place.</p>
 				<form
 					method="POST"
 					action="?/itin-extract-image"
@@ -1453,12 +1484,15 @@
 						type="file"
 						name="image"
 						accept="image/jpeg,image/png,image/webp,image/heic,.jpg,.jpeg,.png,.webp,.heic"
-						onchange={(e) => { itinImageFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null; }}
+						onchange={(e) => { itinImageFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null; itinImagePasted = false; }}
 					/>
 					<button class="btn small" type="submit" disabled={itinImageExtracting || !itinImageFile}>
 						{itinImageExtracting ? 'Identifying...' : 'Identify place'}
 					</button>
 				</form>
+				{#if itinImagePasted && itinImageFile}
+					<p class="extract-msg">Pasted image ready ({Math.round(itinImageFile.size / 1024)} KB)</p>
+				{/if}
 				{#if itinImageMsg}<p class="extract-msg">{itinImageMsg}</p>{/if}
 			</div>
 		</details>
@@ -2613,6 +2647,10 @@
 		padding: 10px 12px;
 		margin-bottom: 12px;
 		background: var(--bg);
+	}
+	.photo-drop:focus {
+		outline: 2px dashed var(--link);
+		outline-offset: -2px;
 	}
 	.extract-head {
 		margin: 0 0 8px;
