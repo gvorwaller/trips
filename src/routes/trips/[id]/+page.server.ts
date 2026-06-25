@@ -73,8 +73,11 @@ import {
 } from '$server/dayplans';
 import {
 	extractItineraryFromText,
+	extractItineraryFromImage,
+	extractItineraryFromGoogleMapsUrl,
 	type ExtractedItineraryItem
 } from '$server/itinerary-extract';
+import { isGoogleMapsUrl } from '$server/google-maps-url';
 import {
 	importItineraryCandidates,
 	type ItineraryImportCandidate
@@ -86,7 +89,7 @@ import {
 	deleteAttachment,
 	renameAttachment
 } from '$server/attachments';
-import { MAX_ATTACHMENT_BYTES } from '$lib/filevalidate';
+import { MAX_ATTACHMENT_BYTES, detectFileType } from '$lib/filevalidate';
 
 function parseId(param: string | FormDataEntryValue | null): number {
 	const id = Number(param);
@@ -332,6 +335,66 @@ export const actions: Actions = {
 		if (!candidates) {
 			return fail(502, {
 				error: 'Could not extract itinerary candidates. Try simplifying the text or add places manually.'
+			});
+		}
+		return { ok: true, candidates: markDuplicates(candidates, existing) };
+	},
+
+	'itin-extract-url': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		const trip = await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const url = (form.get('url') ?? '').toString().trim();
+		if (!url) return fail(400, { error: 'Paste a Google Maps link.' });
+		if (!isGoogleMapsUrl(url)) {
+			return fail(400, { error: 'Not a recognized Google Maps URL.' });
+		}
+		const existing = await listItinerary(tripId);
+		const tripDates =
+			trip.start_date || trip.end_date ? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}` : '';
+		const candidates = await extractItineraryFromGoogleMapsUrl(url, {
+			tripName: trip.name,
+			tripDates,
+			tripNotes: trip.notes,
+			existingTitles: existing.map((i) => i.title)
+		});
+		if (!candidates) {
+			return fail(502, {
+				error: 'Could not extract place from that link. Try pasting the full Google Maps URL.'
+			});
+		}
+		return { ok: true, candidates: markDuplicates(candidates, existing) };
+	},
+
+	'itin-extract-image': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		const trip = await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const file = form.get('image');
+		if (!(file instanceof File) || file.size === 0) {
+			return fail(400, { error: 'Upload a photo.' });
+		}
+		if (file.size > 20 * 1024 * 1024) {
+			return fail(400, { error: 'Image must be under 20 MB.' });
+		}
+		const bytes = new Uint8Array(await file.arrayBuffer());
+		const detected = detectFileType(bytes);
+		if (!detected || detected.kind === 'pdf') {
+			return fail(400, { error: 'Unsupported image format. Use JPEG, PNG, WebP, or HEIC.' });
+		}
+		const base64 = Buffer.from(bytes).toString('base64');
+		const existing = await listItinerary(tripId);
+		const tripDates =
+			trip.start_date || trip.end_date ? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}` : '';
+		const candidates = await extractItineraryFromImage(base64, detected.mime, {
+			tripName: trip.name,
+			tripDates,
+			tripNotes: trip.notes,
+			existingTitles: existing.map((i) => i.title)
+		});
+		if (!candidates) {
+			return fail(502, {
+				error: 'Could not identify a place from this photo. Try a clearer image or add the place manually.'
 			});
 		}
 		return { ok: true, candidates: markDuplicates(candidates, existing) };

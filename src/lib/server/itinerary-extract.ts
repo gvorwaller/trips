@@ -1,5 +1,7 @@
 import { env } from '$env/dynamic/private';
 import { ITEM_TYPES, type ItemType } from './itinerary';
+import { parseGoogleMapsUrl } from './google-maps-url';
+import { geocodePlace } from './geocode';
 
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -126,9 +128,25 @@ Return your answer ONLY by calling the submit_itinerary_candidates tool. Rules:
 - Use date as YYYY-MM-DD only when the source makes it clear.
 - Return an empty array if there are no itinerary candidates.`;
 
-type ContentBlock = { type: 'text'; text: string };
+type ContentBlock =
+	| { type: 'text'; text: string }
+	| { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
 
-async function callExtractor(blocks: ContentBlock[]): Promise<ExtractedItineraryItem[] | null> {
+const IMAGE_SYSTEM_PROMPT = `You identify places from photos and extract structured itinerary items.
+
+Return your answer ONLY by calling the submit_itinerary_candidates tool. Rules:
+- Identify the place, landmark, restaurant, attraction, or location shown in the photo.
+- Extract the place name from visible signage, menus, landmarks, or recognizable features.
+- Use item_type "place" for identifiable locations.
+- Put a brief description of what you see in notes (e.g. "Outdoor café with red awnings on a cobblestone street").
+- If you can identify the specific business or landmark name, use it as the title.
+- If visible text gives an address, put it in address and build location_query for geocoding.
+- Build location_query from the best available location info (place name + city/region from trip context).
+- Do not invent facts you cannot see or infer from the image.
+- Return an empty array if you cannot identify any place from the photo.
+- Usually return exactly one place item, unless the photo clearly shows multiple distinct places.`;
+
+async function callExtractor(blocks: ContentBlock[], systemPrompt?: string): Promise<ExtractedItineraryItem[] | null> {
 	if (!env.ANTHROPIC_API_KEY) {
 		console.warn('[itinerary-extract] ANTHROPIC_API_KEY not set - extraction disabled');
 		return null;
@@ -146,7 +164,7 @@ async function callExtractor(blocks: ContentBlock[]): Promise<ExtractedItinerary
 			body: JSON.stringify({
 				model: DEFAULT_MODEL,
 				max_tokens: 6000,
-				system: SYSTEM_PROMPT,
+				system: systemPrompt ?? SYSTEM_PROMPT,
 				tools: [SUBMIT_TOOL],
 				tool_choice: { type: 'tool', name: 'submit_itinerary_candidates' },
 				messages: [{ role: 'user', content: blocks }]
@@ -226,13 +244,8 @@ function normalizeItem(raw: unknown, depth: number, count: { n: number }): Extra
 	};
 }
 
-export function extractItineraryFromText(
-	text: string,
-	context: ItineraryExtractContext = {}
-): Promise<ExtractedItineraryItem[] | null> {
-	const trimmed = text.trim().slice(0, 50_000);
-	if (!trimmed) return Promise.resolve(null);
-	const ctx = [
+function buildContextString(context: ItineraryExtractContext): string {
+	return [
 		context.tripName ? `Trip name: ${context.tripName}` : null,
 		context.tripDates ? `Trip dates: ${context.tripDates}` : null,
 		context.tripNotes ? `Trip notes: ${context.tripNotes}` : null,
@@ -244,10 +257,84 @@ export function extractItineraryFromText(
 	]
 		.filter(Boolean)
 		.join('\n');
+}
+
+export function extractItineraryFromText(
+	text: string,
+	context: ItineraryExtractContext = {}
+): Promise<ExtractedItineraryItem[] | null> {
+	const trimmed = text.trim().slice(0, 50_000);
+	if (!trimmed) return Promise.resolve(null);
+	const ctx = buildContextString(context);
 	return callExtractor([
 		{
 			type: 'text',
 			text: `${ctx ? `${ctx}\n\n` : ''}Rough itinerary / place text:\n\n${trimmed}`
 		}
 	]);
+}
+
+const IMAGE_MIMES = new Set([
+	'image/jpeg',
+	'image/png',
+	'image/webp',
+	'image/gif',
+	'image/heic',
+	'image/heif'
+]);
+
+export function extractItineraryFromImage(
+	imageBase64: string,
+	mimeType: string,
+	context: ItineraryExtractContext = {}
+): Promise<ExtractedItineraryItem[] | null> {
+	if (!imageBase64 || !IMAGE_MIMES.has(mimeType)) return Promise.resolve(null);
+	const ctx = buildContextString(context);
+	const blocks: ContentBlock[] = [
+		{ type: 'image', source: { type: 'base64', media_type: mimeType, data: imageBase64 } },
+		{
+			type: 'text',
+			text: `${ctx ? `${ctx}\n\n` : ''}Identify the place(s) in this photo and extract as itinerary items.`
+		}
+	];
+	return callExtractor(blocks, IMAGE_SYSTEM_PROMPT);
+}
+
+export async function extractItineraryFromGoogleMapsUrl(
+	rawUrl: string,
+	context: ItineraryExtractContext = {}
+): Promise<ExtractedItineraryItem[] | null> {
+	const parsed = await parseGoogleMapsUrl(rawUrl);
+	if (!parsed) return null;
+
+	let { lat, lng, name } = parsed;
+
+	// If URL didn't contain coordinates, geocode the query
+	if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+		const query = parsed.placeQuery ?? name;
+		if (!query) return null;
+		const geo = await geocodePlace(
+			context.tripName ? `${query}, ${context.tripName}` : query
+		);
+		if (geo) {
+			lat = geo.lat;
+			lng = geo.lng;
+			if (!name) name = geo.name;
+		}
+	}
+
+	const title = name || 'Unnamed place';
+	const item: ExtractedItineraryItem = {
+		item_type: 'place',
+		title,
+		date: null,
+		notes: null,
+		external_url: rawUrl.trim(),
+		address: null,
+		location_query: name,
+		lat: Number.isFinite(lat) ? lat : null,
+		lon: Number.isFinite(lng) ? lng : null,
+		children: []
+	};
+	return [item];
 }

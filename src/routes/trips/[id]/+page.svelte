@@ -225,6 +225,12 @@
 	let itinCandidates = $state<ItinCandidate[]>([]);
 	let itinImportParentId = $state('');
 	let itinGeocode = $state(true);
+	let itinUrlText = $state('');
+	let itinUrlExtracting = $state(false);
+	let itinUrlMsg = $state('');
+	let itinImageFile = $state<File | null>(null);
+	let itinImageExtracting = $state(false);
+	let itinImageMsg = $state('');
 	const itinImportParents = $derived(
 		data.itineraryRows.filter((r) =>
 			['day', 'section', 'place'].includes(r.node.item_type)
@@ -1366,58 +1372,148 @@
 				</form>
 				{#if itinExtractMsg}<p class="extract-msg">{itinExtractMsg}</p>{/if}
 			</div>
-
-			{#if itinCandidates.length > 0}
-				<div class="candidates itinerary-candidates">
-					<div class="import-target">
-						<label>
-							Import under
-							<select bind:value={itinImportParentId}>
-								<option value="">Top level</option>
-								{#each itinImportParents as { node, depth } (node.id)}
-									<option value={String(node.id)}>
-										{'· '.repeat(depth)}{node.title} ({node.item_type})
-									</option>
-								{/each}
-							</select>
-						</label>
-						<label class="extract-opt">
-							<input type="checkbox" bind:checked={itinGeocode} />
-							Geocode places
-						</label>
-					</div>
-					<div class="cand-list">
-						{@render itineraryCandidateRows(itinCandidates, 0)}
-					</div>
-					<div class="cand-actions">
-						<button class="btn small" type="button" onclick={() => selectAllItin(true)}>
-							Select all
-						</button>
-						<button class="btn small" type="button" onclick={() => selectAllItin(false)}>
-							Select none
-						</button>
-						<button
-							class="btn small primary"
-							type="button"
-							onclick={importSelectedItinerary}
-							disabled={itinImporting || selectedItinCount() === 0}
-						>
-							{itinImporting
-								? 'Importing...'
-								: `Import ${selectedItinCount()} item${selectedItinCount() === 1 ? '' : 's'}`}
-						</button>
-						<button
-							class="btn small"
-							type="button"
-							onclick={() => {
-								itinCandidates = [];
-								itinExtractMsg = '';
-							}}>Clear</button
-						>
-					</div>
-				</div>
-			{/if}
 		</details>
+		<details class="paste">
+			<summary>Import from Google Maps link</summary>
+			<div class="extract">
+				<p class="extract-head">Paste a Google Maps link to extract the place and coordinates.</p>
+				<form
+					method="POST"
+					action="?/itin-extract-url"
+					class="extract-form"
+					use:enhance={() => {
+						itinUrlExtracting = true;
+						itinUrlMsg = '';
+						return async ({ result }) => {
+							itinUrlExtracting = false;
+							if (result.type === 'success' && result.data?.ok) {
+								const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
+								itinCandidates = withItinSelection(raw);
+								if (raw.length === 0) {
+									itinUrlMsg = 'Could not extract a place from that link.';
+								} else {
+									const dupes = raw.filter((c) => c.duplicate).length;
+									itinUrlMsg = `${raw.length} place${raw.length === 1 ? '' : 's'} found${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+								}
+							} else if (result.type === 'failure') {
+								itinUrlMsg =
+									(result.data as { error?: string })?.error ?? 'Extraction failed.';
+							} else {
+								itinUrlMsg = 'Extraction failed.';
+							}
+						};
+					}}
+				>
+					<input
+						type="url"
+						name="url"
+						bind:value={itinUrlText}
+						placeholder="https://maps.google.com/... or maps.app.goo.gl/..."
+					/>
+					<button class="btn small" type="submit" disabled={itinUrlExtracting || !itinUrlText.trim()}>
+						{itinUrlExtracting ? 'Extracting...' : 'Extract place'}
+					</button>
+				</form>
+				{#if itinUrlMsg}<p class="extract-msg">{itinUrlMsg}</p>{/if}
+			</div>
+		</details>
+		<details class="paste">
+			<summary>Import from photo</summary>
+			<div class="extract">
+				<p class="extract-head">Upload a photo and the AI will identify the place.</p>
+				<form
+					method="POST"
+					action="?/itin-extract-image"
+					enctype="multipart/form-data"
+					class="extract-form"
+					use:enhance={() => {
+						itinImageExtracting = true;
+						itinImageMsg = '';
+						return async ({ result }) => {
+							itinImageExtracting = false;
+							if (result.type === 'success' && result.data?.ok) {
+								const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
+								itinCandidates = withItinSelection(raw);
+								if (raw.length === 0) {
+									itinImageMsg = 'Could not identify a place in this photo.';
+								} else {
+									const dupes = raw.filter((c) => c.duplicate).length;
+									itinImageMsg = `${raw.length} place${raw.length === 1 ? '' : 's'} identified${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+								}
+							} else if (result.type === 'failure') {
+								itinImageMsg =
+									(result.data as { error?: string })?.error ?? 'Extraction failed.';
+							} else {
+								itinImageMsg = 'Extraction failed.';
+							}
+						};
+					}}
+				>
+					<input
+						type="file"
+						name="image"
+						accept="image/jpeg,image/png,image/webp,image/heic,.jpg,.jpeg,.png,.webp,.heic"
+						onchange={(e) => { itinImageFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null; }}
+					/>
+					<button class="btn small" type="submit" disabled={itinImageExtracting || !itinImageFile}>
+						{itinImageExtracting ? 'Identifying...' : 'Identify place'}
+					</button>
+				</form>
+				{#if itinImageMsg}<p class="extract-msg">{itinImageMsg}</p>{/if}
+			</div>
+		</details>
+		{#if itinCandidates.length > 0}
+			<div class="candidates itinerary-candidates">
+				<div class="import-target">
+					<label>
+						Import under
+						<select bind:value={itinImportParentId}>
+							<option value="">Top level</option>
+							{#each itinImportParents as { node, depth } (node.id)}
+								<option value={String(node.id)}>
+									{'· '.repeat(depth)}{node.title} ({node.item_type})
+								</option>
+							{/each}
+						</select>
+					</label>
+					<label class="extract-opt">
+						<input type="checkbox" bind:checked={itinGeocode} />
+						Geocode places
+					</label>
+				</div>
+				<div class="cand-list">
+					{@render itineraryCandidateRows(itinCandidates, 0)}
+				</div>
+				<div class="cand-actions">
+					<button class="btn small" type="button" onclick={() => selectAllItin(true)}>
+						Select all
+					</button>
+					<button class="btn small" type="button" onclick={() => selectAllItin(false)}>
+						Select none
+					</button>
+					<button
+						class="btn small primary"
+						type="button"
+						onclick={importSelectedItinerary}
+						disabled={itinImporting || selectedItinCount() === 0}
+					>
+						{itinImporting
+							? 'Importing...'
+							: `Import ${selectedItinCount()} item${selectedItinCount() === 1 ? '' : 's'}`}
+					</button>
+					<button
+						class="btn small"
+						type="button"
+						onclick={() => {
+							itinCandidates = [];
+							itinExtractMsg = '';
+							itinUrlMsg = '';
+							itinImageMsg = '';
+						}}>Clear</button
+					>
+				</div>
+			</div>
+		{/if}
 	{/if}
 	{/if}
 </div>
