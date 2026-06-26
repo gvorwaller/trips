@@ -8,6 +8,7 @@ import {
 	updateItem,
 	deleteItem,
 	getItem,
+	setLocation,
 	ITEM_TYPES,
 	type ItemType
 } from '$server/itinerary';
@@ -55,10 +56,7 @@ import {
 	type ExpenseInput,
 	EXPENSE_CATEGORIES
 } from '$server/expenses';
-import {
-	extractExpensesFromText,
-	extractExpensesFromDocument
-} from '$server/expense-extract';
+import { extractExpensesFromText, extractExpensesFromDocument } from '$server/expense-extract';
 import {
 	listDayPlans,
 	listStopsForTrip,
@@ -69,8 +67,13 @@ import {
 	removeStop,
 	reorderStops,
 	updateStopNotes,
+	bulkUpdateDriving,
+	bulkUpdateAiNotes,
+	optimizeStopOrder,
 	type StopInput
 } from '$server/dayplans';
+import { generateTripNotes, AiNotesError } from '$server/ai-notes';
+import { placesNearbyCached } from '$server/geocode';
 import {
 	extractItineraryFromText,
 	extractItineraryFromImage,
@@ -78,10 +81,7 @@ import {
 	type ExtractedItineraryItem
 } from '$server/itinerary-extract';
 import { isGoogleMapsUrl } from '$server/google-maps-url';
-import {
-	importItineraryCandidates,
-	type ItineraryImportCandidate
-} from '$server/itinerary-import';
+import { importItineraryCandidates, type ItineraryImportCandidate } from '$server/itinerary-import';
 import {
 	listAttachmentsForTrip,
 	uploadAttachment,
@@ -90,6 +90,8 @@ import {
 	renameAttachment
 } from '$server/attachments';
 import { MAX_ATTACHMENT_BYTES, detectFileType } from '$lib/filevalidate';
+import { haversineKm } from '$lib/geo';
+import { weatherFor, type WeatherResult } from '$server/weather';
 
 function parseId(param: string | FormDataEntryValue | null): number {
 	const id = Number(param);
@@ -159,8 +161,55 @@ function parseIdArray(raw: string | undefined): number[] {
 	return data.map(Number).filter((n) => Number.isInteger(n) && n > 0);
 }
 
+function parseDrivingLegs(raw: string | undefined) {
+	if (!raw) return [];
+	let data: unknown;
+	try {
+		data = JSON.parse(raw);
+	} catch {
+		throw error(400, 'Invalid driving legs.');
+	}
+	if (!Array.isArray(data) || data.length > 100) throw error(400, 'Invalid driving legs.');
+	return data.map((item) => {
+		if (!item || typeof item !== 'object') throw error(400, 'Invalid driving leg.');
+		const leg = item as { stopId?: unknown; km?: unknown; min?: unknown };
+		const stopId = Number(leg.stopId);
+		const km = Number(leg.km);
+		const min = Number(leg.min);
+		if (
+			!Number.isInteger(stopId) ||
+			stopId <= 0 ||
+			!Number.isFinite(km) ||
+			km < 0 ||
+			km > 50000 ||
+			!Number.isFinite(min) ||
+			min < 0 ||
+			min > 100000
+		) {
+			throw error(400, 'Invalid driving leg.');
+		}
+		return {
+			stopId,
+			km: Math.round(km * 10) / 10,
+			min: Math.max(0, Math.round(min))
+		};
+	});
+}
+
+function parseOrigin(form: FormData): { lat: number; lon: number } | null {
+	const rawLat = form.get('origin_lat')?.toString().trim();
+	const rawLon = form.get('origin_lon')?.toString().trim();
+	if (!rawLat && !rawLon) return null;
+	const lat = Number(rawLat);
+	const lon = Number(rawLon);
+	if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw error(400, 'Invalid origin.');
+	if (lat < -90 || lat > 90 || lon < -180 || lon > 180) throw error(400, 'Invalid origin.');
+	return { lat, lon };
+}
+
 function manualItineraryText(itemType: ItemType, title: string, notes: string | null) {
-	if (itemType !== 'note' || notes || title.length <= 180) return { title: title.slice(0, 500), notes };
+	if (itemType !== 'note' || notes || title.length <= 180)
+		return { title: title.slice(0, 500), notes };
 
 	const colon = title.indexOf(':');
 	const newline = title.search(/\r?\n/);
@@ -197,18 +246,17 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		expenses,
 		dayPlans,
 		dayPlanStops
-	] =
-		await Promise.all([
-			listItinerary(tripId),
-			listPackingLists(tripId),
-			getPackingItemsForTrip(tripId),
-			listTemplates(ownerId),
-			listReservations(tripId),
-			listAttachmentsForTrip(tripId),
-			listExpenses(tripId),
-			listDayPlans(tripId),
-			listStopsForTrip(tripId)
-		]);
+	] = await Promise.all([
+		listItinerary(tripId),
+		listPackingLists(tripId),
+		getPackingItemsForTrip(tripId),
+		listTemplates(ownerId),
+		listReservations(tripId),
+		listAttachmentsForTrip(tripId),
+		listExpenses(tripId),
+		listDayPlans(tripId),
+		listStopsForTrip(tripId)
+	]);
 
 	const itineraryRows = flattenTree(itinerary);
 	const packing = lists.map((list) => {
@@ -221,6 +269,32 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		const checked = leaves.filter((i) => i.checked).length;
 		return { list, rows: flattenTree(items), total: leaves.length, checked };
 	});
+
+	const weatherByPlan: Record<number, WeatherResult> = {};
+	const weatherJobs: Array<{ planId: number; lat: number; lng: number }> = [];
+	for (const plan of dayPlans) {
+		const planStops = dayPlanStops.filter((s) => s.day_plan_id === plan.id);
+		const first = planStops.find(
+			(s) => typeof s.snapshot_lat === 'number' && typeof s.snapshot_lon === 'number'
+		);
+		if (first && first.snapshot_lat != null && first.snapshot_lon != null) {
+			weatherJobs.push({ planId: plan.id, lat: first.snapshot_lat, lng: first.snapshot_lon });
+		}
+	}
+	if (weatherJobs.length > 0) {
+		const timeout = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 3000));
+		const work = Promise.allSettled(weatherJobs.map((j) => weatherFor(j.lat, j.lng)));
+		const race = await Promise.race([work, timeout]);
+		if (race !== 'timeout') {
+			for (let i = 0; i < race.length; i++) {
+				const r = race[i];
+				if (r.status === 'fulfilled' && r.value) {
+					weatherByPlan[weatherJobs[i].planId] = r.value;
+				}
+			}
+		}
+	}
+
 	return {
 		trip,
 		itineraryRows,
@@ -230,7 +304,8 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 		attachments,
 		expenses,
 		dayPlans,
-		dayPlanStops
+		dayPlanStops,
+		weatherByPlan
 	};
 };
 
@@ -325,7 +400,9 @@ export const actions: Actions = {
 		if (!text.trim()) return fail(400, { error: 'Paste itinerary text first.' });
 		const existing = await listItinerary(tripId);
 		const tripDates =
-			trip.start_date || trip.end_date ? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}` : '';
+			trip.start_date || trip.end_date
+				? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}`
+				: '';
 		const candidates = await extractItineraryFromText(text, {
 			tripName: trip.name,
 			tripDates,
@@ -334,7 +411,8 @@ export const actions: Actions = {
 		});
 		if (!candidates) {
 			return fail(502, {
-				error: 'Could not extract itinerary candidates. Try simplifying the text or add places manually.'
+				error:
+					'Could not extract itinerary candidates. Try simplifying the text or add places manually.'
 			});
 		}
 		return { ok: true, candidates: markDuplicates(candidates, existing) };
@@ -351,7 +429,9 @@ export const actions: Actions = {
 		}
 		const existing = await listItinerary(tripId);
 		const tripDates =
-			trip.start_date || trip.end_date ? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}` : '';
+			trip.start_date || trip.end_date
+				? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}`
+				: '';
 		const candidates = await extractItineraryFromGoogleMapsUrl(url, {
 			tripName: trip.name,
 			tripDates,
@@ -385,7 +465,9 @@ export const actions: Actions = {
 		const base64 = Buffer.from(bytes).toString('base64');
 		const existing = await listItinerary(tripId);
 		const tripDates =
-			trip.start_date || trip.end_date ? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}` : '';
+			trip.start_date || trip.end_date
+				? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}`
+				: '';
 		const candidates = await extractItineraryFromImage(base64, detected.mime, {
 			tripName: trip.name,
 			tripDates,
@@ -394,7 +476,8 @@ export const actions: Actions = {
 		});
 		if (!candidates) {
 			return fail(502, {
-				error: 'Could not identify a place from this photo. Try a clearer image or add the place manually.'
+				error:
+					'Could not identify a place from this photo. Try a clearer image or add the place manually.'
 			});
 		}
 		return { ok: true, candidates: markDuplicates(candidates, existing) };
@@ -471,13 +554,7 @@ export const actions: Actions = {
 		const item = await getItem(tripId, id);
 		if (!item) throw error(404, 'Item not found');
 		if (item.parent_id === parentId) return { ok: true, moved: false };
-		const ok = await runReparent(
-			'itinerary_items',
-			tripId,
-			id,
-			parentId,
-			Number.MAX_SAFE_INTEGER
-		);
+		const ok = await runReparent('itinerary_items', tripId, id, parentId, Number.MAX_SAFE_INTEGER);
 		return { ok, moved: ok };
 	},
 
@@ -554,6 +631,42 @@ export const actions: Actions = {
 		return { ok: true };
 	},
 
+	'dayplan-set-driving': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const ok = await bulkUpdateDriving(
+			tripId,
+			parseId(form.get('plan_id')),
+			parseDrivingLegs(form.get('legs')?.toString())
+		);
+		if (!ok) return fail(400, { error: 'Invalid driving legs.' });
+		return { ok: true };
+	},
+
+	'dayplan-set-order': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const orderedStopIds = parseIdArray(form.get('ordered_stop_ids')?.toString());
+		const ok = await reorderStops(tripId, parseId(form.get('plan_id')), orderedStopIds);
+		if (!ok) return fail(400, { error: 'Invalid stop order.' });
+		return { ok: true, orderedStopIds };
+	},
+
+	'dayplan-optimize-fallback': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const orderedStopIds = await optimizeStopOrder(
+			tripId,
+			parseId(form.get('plan_id')),
+			parseOrigin(form)
+		);
+		if (!orderedStopIds) return fail(400, { error: 'Could not optimize stop order.' });
+		return { ok: true, orderedStopIds };
+	},
+
 	'dayplan-stop-notes': async ({ params, request, locals }) => {
 		const { ownerId, tripId } = ctx(locals, params);
 		await ownTrip(ownerId, tripId);
@@ -561,6 +674,164 @@ export const actions: Actions = {
 		const ok = await updateStopNotes(tripId, parseId(form.get('id')), cleanText(form.get('notes')));
 		if (!ok) throw error(404, 'Stop not found');
 		return { ok: true };
+	},
+
+	'dayplan-ai-notes': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		const trip = await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const planId = parseId(form.get('plan_id'));
+		const allStops = await listStopsForTrip(tripId);
+		const stops = allStops
+			.filter((s) => s.day_plan_id === planId)
+			.map((s) => ({ id: s.id, name: s.snapshot_title, notes: s.notes }));
+		if (stops.length === 0) return fail(400, { error: 'No stops in this plan.' });
+		const plans = await listDayPlans(tripId);
+		const plan = plans.find((p) => p.id === planId);
+		if (!plan) throw error(404, 'Day plan not found');
+		const first = allStops.find(
+			(s) =>
+				s.day_plan_id === planId &&
+				typeof s.snapshot_lat === 'number' &&
+				typeof s.snapshot_lon === 'number'
+		);
+		let weather: import('$server/weather').WeatherResult | null = null;
+		if (first?.snapshot_lat != null && first?.snapshot_lon != null) {
+			try {
+				weather = await weatherFor(first.snapshot_lat, first.snapshot_lon);
+			} catch {
+				/* weather is optional context */
+			}
+		}
+		try {
+			const notes = await generateTripNotes({
+				tripName: trip.name,
+				stops,
+				weather,
+				date: plan.optional_date
+			});
+			await bulkUpdateAiNotes(tripId, planId, notes);
+			return { ok: true, notes };
+		} catch (err) {
+			if (err instanceof AiNotesError) return fail(502, { error: err.message });
+			throw err;
+		}
+	},
+
+	'dayplan-suggest': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const planId = parseId(form.get('plan_id'));
+		const allStops = await listStopsForTrip(tripId);
+		const planStops = allStops.filter((s) => s.day_plan_id === planId);
+		const planStopItemIds = new Set(planStops.map((s) => s.itinerary_item_id).filter(Boolean));
+		const locatedStops = planStops.filter(
+			(s) => typeof s.snapshot_lat === 'number' && typeof s.snapshot_lon === 'number'
+		);
+		if (locatedStops.length < 2) {
+			return fail(400, { error: 'Need at least two stops with coordinates.' });
+		}
+		const centroidLat =
+			locatedStops.reduce((sum, s) => sum + s.snapshot_lat!, 0) / locatedStops.length;
+		const centroidLon =
+			locatedStops.reduce((sum, s) => sum + s.snapshot_lon!, 0) / locatedStops.length;
+
+		const itinerary = await listItinerary(tripId);
+		const internal = itinerary
+			.filter((item) => {
+				if (item.item_type !== 'place') return false;
+				if (planStopItemIds.has(item.id)) return false;
+				if (typeof item.lat !== 'number' || typeof item.lon !== 'number') return false;
+				const km = haversineKm(centroidLat, centroidLon, item.lat!, item.lon!);
+				return km <= 30;
+			})
+			.map((item) => ({
+				source: 'internal' as const,
+				name: item.title,
+				lat: item.lat!,
+				lng: item.lon!,
+				distance_km:
+					Math.round(haversineKm(centroidLat, centroidLon, item.lat!, item.lon!) * 10) / 10,
+				itinerary_item_id: item.id,
+				vicinity: item.notes ?? null
+			}));
+
+		let external: Array<{
+			source: 'external';
+			name: string;
+			lat: number;
+			lng: number;
+			distance_km: number;
+			vicinity: string | null;
+		}> = [];
+		const nearbyResult = await placesNearbyCached(centroidLat, centroidLon);
+		if (nearbyResult.status === 'ok') {
+			const internalNames = new Set(internal.map((i) => i.name.toLowerCase()));
+			const itinNames = new Set(itinerary.map((i) => i.title.toLowerCase()));
+			external = nearbyResult.places
+				.filter(
+					(p) => !internalNames.has(p.name.toLowerCase()) && !itinNames.has(p.name.toLowerCase())
+				)
+				.map((p) => ({
+					source: 'external' as const,
+					name: p.name,
+					lat: p.lat,
+					lng: p.lng,
+					distance_km: Math.round(haversineKm(centroidLat, centroidLon, p.lat, p.lng) * 10) / 10,
+					vicinity: p.vicinity
+				}));
+		}
+
+		return { ok: true, internal, external };
+	},
+
+	'dayplan-add-suggestion': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const planId = parseId(form.get('plan_id'));
+		const name = (form.get('name') ?? '').toString().trim();
+		if (!name) return fail(400, { error: 'Name is required.' });
+		const lat = Number(form.get('lat'));
+		const lng = Number(form.get('lng'));
+		const hasCoords =
+			Number.isFinite(lat) &&
+			Number.isFinite(lng) &&
+			lat >= -90 &&
+			lat <= 90 &&
+			lng >= -180 &&
+			lng <= 180;
+		const existingId = optId(form.get('itinerary_item_id'));
+		if (!existingId && !hasCoords) {
+			return fail(400, { error: 'External suggestions require valid coordinates.' });
+		}
+		const plans = await listDayPlans(tripId);
+		if (!plans.some((p) => p.id === planId)) {
+			return fail(400, { error: 'Day plan not found.' });
+		}
+
+		let itemId: number;
+		if (existingId) {
+			itemId = existingId;
+		} else {
+			itemId = await createItem(tripId, {
+				parent_id: null,
+				item_type: 'place',
+				title: name.slice(0, 500),
+				notes: (form.get('vicinity') ?? '').toString().trim() || null
+			});
+			if (hasCoords) {
+				await setLocation(tripId, itemId, lat, lng, null);
+			}
+		}
+
+		const stopId = await addStop(tripId, planId, {
+			itinerary_item_id: itemId,
+			notes: null
+		});
+		if (stopId === null) return fail(400, { error: 'Could not add stop.' });
+		return { ok: true, itemId, stopId };
 	},
 
 	// ── Packing lists ──────────────────────────────────────
@@ -837,7 +1108,8 @@ export const actions: Actions = {
 			form.get('source') === 'document'
 				? await extractExpensesFromDocument(ownerId, parseId(form.get('attachment_id')))
 				: await extractExpensesFromText((form.get('text') ?? '').toString());
-		if (!candidates) return fail(502, { error: 'Could not extract expenses. Try again or add manually.' });
+		if (!candidates)
+			return fail(502, { error: 'Could not extract expenses. Try again or add manually.' });
 		return { ok: true, candidates };
 	},
 

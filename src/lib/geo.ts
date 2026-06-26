@@ -13,3 +13,10 @@ export function haversineKm(lat1: number, lon1: number, lat2: number, lon2: numb
 export function formatKm(km: number): string {
 	return km < 10 ? `${km.toFixed(1)} km` : `${Math.round(km)} km`;
 }
+
+export function formatDuration(min: number): string {
+	if (min < 60) return `${min} min`;
+	const h = Math.floor(min / 60);
+	const m = min % 60;
+	return m ? `${h} h ${m} min` : `${h} h`;
+}

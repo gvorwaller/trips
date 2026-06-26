@@ -4,6 +4,7 @@
  * map taps. The user never types raw coordinates.
  */
 import { env } from '$env/dynamic/private';
+import { query as dbQuery } from '$lib/db';
 
 export interface GeoResult {
 	lat: number;
@@ -58,4 +59,94 @@ export async function reverseGeocode(lat: number, lng: number): Promise<string |
 
 export function geocodeConfigured(): boolean {
 	return !!env.GOOGLE_GEOCODING_KEY;
+}
+
+export interface NearbyPlace {
+	name: string;
+	lat: number;
+	lng: number;
+	vicinity: string | null;
+	types: string[];
+}
+
+export type PlacesNearbyResult =
+	| { status: 'ok'; places: NearbyPlace[] }
+	| { status: 'not_configured' }
+	| { status: 'not_found' }
+	| { status: 'rate_limited' }
+	| { status: 'upstream_error' };
+
+interface GooglePlacesResponse {
+	status: string;
+	error_message?: string;
+	results?: {
+		name?: string;
+		geometry?: { location?: { lat: number; lng: number } };
+		vicinity?: string;
+		types?: string[];
+	}[];
+}
+
+export async function placesNearby(
+	lat: number,
+	lng: number,
+	opts: { radiusM?: number; type?: string; keyword?: string } = {}
+): Promise<PlacesNearbyResult> {
+	if (!env.GOOGLE_GEOCODING_KEY) return { status: 'not_configured' };
+	const url = new URL('https://maps.googleapis.com/maps/api/place/nearbysearch/json');
+	url.searchParams.set('key', env.GOOGLE_GEOCODING_KEY);
+	url.searchParams.set('location', `${lat},${lng}`);
+	url.searchParams.set('radius', String(Math.round(opts.radiusM ?? 16000)));
+	url.searchParams.set('type', opts.type ?? 'tourist_attraction');
+	url.searchParams.set('keyword', opts.keyword ?? 'historic landmark museum culture');
+
+	let res: Response;
+	try {
+		res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+	} catch {
+		return { status: 'upstream_error' };
+	}
+	if (!res.ok) return { status: 'upstream_error' };
+	const data = (await res.json()) as GooglePlacesResponse;
+
+	if (data.status === 'ZERO_RESULTS') return { status: 'not_found' };
+	if (data.status === 'OVER_QUERY_LIMIT') return { status: 'rate_limited' };
+	if (data.status !== 'OK') return { status: 'upstream_error' };
+
+	const places: NearbyPlace[] = (data.results ?? [])
+		.filter((r) => r.geometry?.location)
+		.map((r) => ({
+			name: r.name ?? 'Point of interest',
+			lat: r.geometry!.location!.lat,
+			lng: r.geometry!.location!.lng,
+			vicinity: r.vicinity ?? null,
+			types: r.types ?? []
+		}));
+	return places.length ? { status: 'ok', places } : { status: 'not_found' };
+}
+
+export async function placesNearbyCached(
+	lat: number,
+	lng: number,
+	opts: { radiusM?: number; type?: string; keyword?: string } = {}
+): Promise<PlacesNearbyResult> {
+	const key = `places:${lat.toFixed(3)}:${lng.toFixed(3)}:${opts.type ?? 'tourist_attraction'}:${opts.radiusM ?? 16000}:${opts.keyword ?? 'historic landmark museum culture'}`;
+	const cached = await dbQuery<{ payload: PlacesNearbyResult; fetched_at: string }>(
+		'SELECT payload, fetched_at FROM api_cache WHERE cache_key = $1',
+		[key]
+	);
+	const row = cached.rows[0];
+	const fresh = row && Date.now() - new Date(row.fetched_at).getTime() < 60 * 60_000;
+	if (row && fresh) return row.payload;
+
+	const result = await placesNearby(lat, lng, opts);
+	if (result.status === 'ok') {
+		await dbQuery(
+			`INSERT INTO api_cache (cache_key, payload, fetched_at)
+			 VALUES ($1, $2, NOW())
+			 ON CONFLICT (cache_key) DO UPDATE SET payload = $2, fetched_at = NOW()`,
+			[key, JSON.stringify(result)]
+		);
+	}
+	return result;
 }

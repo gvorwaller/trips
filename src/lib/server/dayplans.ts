@@ -1,5 +1,6 @@
 import type pg from 'pg';
 import { query, withTransaction } from '$lib/db';
+import { haversineKm } from '$lib/geo';
 
 export interface DayPlan {
 	id: number;
@@ -22,6 +23,9 @@ export interface DayPlanStop {
 	snapshot_lat: number | null;
 	snapshot_lon: number | null;
 	snapshot_place_id: string | null;
+	drive_km: number | null;
+	drive_min: number | null;
+	ai_notes: string | null;
 }
 
 export interface DayPlanInput {
@@ -33,6 +37,17 @@ export interface DayPlanInput {
 export interface StopInput {
 	itinerary_item_id: number;
 	notes: string | null;
+}
+
+export interface DrivingLegInput {
+	stopId: number;
+	km: number;
+	min: number;
+}
+
+export interface OptimizeOrigin {
+	lat: number;
+	lon: number;
 }
 
 const PLAN_SELECT = `id, trip_id, title, notes,
@@ -98,16 +113,7 @@ async function insertStop(
 		    snapshot_title, snapshot_lat, snapshot_lon, snapshot_place_id)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 		 RETURNING id`,
-		[
-			planId,
-			i.id,
-			sortOrder,
-			input.notes,
-			i.title,
-			i.lat,
-			i.lon,
-			i.place_id
-		]
+		[planId, i.id, sortOrder, input.notes, i.title, i.lat, i.lon, i.place_id]
 	);
 	return res.rows[0].id;
 }
@@ -167,6 +173,7 @@ export async function addStop(
 		);
 		const id = await insertStop(client, tripId, planId, sort.rows[0].next, input);
 		if (id !== null) {
+			await clearDrivingForPlan(client, planId);
 			await client.query(`UPDATE day_plans SET updated_at = NOW() WHERE id = $1`, [planId]);
 		}
 		return id;
@@ -186,6 +193,7 @@ export async function removeStop(tripId: number, stopId: number): Promise<boolea
 		const planId = stop.rows[0].day_plan_id;
 		await client.query(`DELETE FROM day_plan_stops WHERE id = $1`, [stopId]);
 		await reindexStops(client, planId);
+		await clearDrivingForPlan(client, planId);
 		await client.query(`UPDATE day_plans SET updated_at = NOW() WHERE id = $1`, [planId]);
 		return true;
 	});
@@ -202,6 +210,18 @@ async function reindexStops(client: Pick<pg.PoolClient, 'query'>, planId: number
 			i
 		]);
 	}
+}
+
+async function clearDrivingForPlan(
+	client: Pick<pg.PoolClient, 'query'>,
+	planId: number
+): Promise<void> {
+	await client.query(
+		`UPDATE day_plan_stops
+		    SET drive_km = NULL, drive_min = NULL
+		  WHERE day_plan_id = $1`,
+		[planId]
+	);
 }
 
 export async function reorderStops(
@@ -229,6 +249,7 @@ export async function reorderStops(
 				i
 			]);
 		}
+		await clearDrivingForPlan(client, planId);
 		await client.query(`UPDATE day_plans SET updated_at = NOW() WHERE id = $1`, [planId]);
 		return true;
 	});
@@ -247,6 +268,31 @@ export async function updateStopNotes(
 		[stopId, tripId, notes]
 	);
 	return (res.rowCount ?? 0) > 0;
+}
+
+export async function bulkUpdateAiNotes(
+	tripId: number,
+	planId: number,
+	notes: Record<number, string>
+): Promise<boolean> {
+	return withTransaction(async (client) => {
+		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
+		const stopRes = await client.query<{ id: number }>(
+			`SELECT id FROM day_plan_stops WHERE day_plan_id = $1`,
+			[planId]
+		);
+		const validIds = new Set(stopRes.rows.map((r) => r.id));
+		for (const [id, note] of Object.entries(notes)) {
+			const stopId = Number(id);
+			if (!validIds.has(stopId)) continue;
+			await client.query(`UPDATE day_plan_stops SET ai_notes = $2 WHERE id = $1`, [
+				stopId,
+				note.slice(0, 2000)
+			]);
+		}
+		await client.query(`UPDATE day_plans SET updated_at = NOW() WHERE id = $1`, [planId]);
+		return true;
+	});
 }
 
 export async function setStopVisited(
@@ -268,7 +314,8 @@ export async function setStopVisited(
 export async function listStopsForTrip(tripId: number): Promise<DayPlanStop[]> {
 	const res = await query<DayPlanStop>(
 		`SELECT s.id, s.day_plan_id, s.itinerary_item_id, s.sort_order, s.notes, s.visited,
-		        s.snapshot_title, s.snapshot_lat, s.snapshot_lon, s.snapshot_place_id
+		        s.snapshot_title, s.snapshot_lat, s.snapshot_lon, s.snapshot_place_id,
+		        s.drive_km, s.drive_min, s.ai_notes
 		   FROM day_plan_stops s
 		   JOIN day_plans p ON p.id = s.day_plan_id
 		  WHERE p.trip_id = $1
@@ -276,4 +323,104 @@ export async function listStopsForTrip(tripId: number): Promise<DayPlanStop[]> {
 		[tripId]
 	);
 	return res.rows;
+}
+
+export async function bulkUpdateDriving(
+	tripId: number,
+	planId: number,
+	legs: DrivingLegInput[]
+): Promise<boolean> {
+	return withTransaction(async (client) => {
+		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
+		const stopRes = await client.query<{ id: number }>(
+			`SELECT id FROM day_plan_stops WHERE day_plan_id = $1 ORDER BY sort_order, id`,
+			[planId]
+		);
+		const expectedLegStopIds = stopRes.rows.slice(1).map((r) => r.id);
+		if (
+			legs.length !== expectedLegStopIds.length ||
+			new Set(legs.map((leg) => leg.stopId)).size !== legs.length ||
+			!legs.every((leg, i) => leg.stopId === expectedLegStopIds[i])
+		) {
+			return false;
+		}
+
+		await clearDrivingForPlan(client, planId);
+		for (const leg of legs) {
+			await client.query(
+				`UPDATE day_plan_stops
+				    SET drive_km = $3, drive_min = $4
+				  WHERE id = $1 AND day_plan_id = $2`,
+				[leg.stopId, planId, leg.km, leg.min]
+			);
+		}
+		await client.query(`UPDATE day_plans SET updated_at = NOW() WHERE id = $1`, [planId]);
+		return true;
+	});
+}
+
+export async function optimizeStopOrder(
+	tripId: number,
+	planId: number,
+	origin: OptimizeOrigin | null
+): Promise<number[] | null> {
+	return withTransaction(async (client) => {
+		if (!(await assertPlanInTrip(client, tripId, planId))) return null;
+		const res = await client.query<{
+			id: number;
+			snapshot_lat: number | null;
+			snapshot_lon: number | null;
+		}>(
+			`SELECT id, snapshot_lat, snapshot_lon
+			   FROM day_plan_stops
+			  WHERE day_plan_id = $1
+			  ORDER BY sort_order, id`,
+			[planId]
+		);
+		if (res.rows.length < 2) return res.rows.map((r) => r.id);
+		const located = res.rows.filter(
+			(r): r is { id: number; snapshot_lat: number; snapshot_lon: number } =>
+				typeof r.snapshot_lat === 'number' && typeof r.snapshot_lon === 'number'
+		);
+		const unlocated = res.rows.filter(
+			(r) => typeof r.snapshot_lat !== 'number' || typeof r.snapshot_lon !== 'number'
+		);
+		if (located.length < 2) return res.rows.map((r) => r.id);
+
+		let current = origin ?? { lat: located[0].snapshot_lat, lon: located[0].snapshot_lon };
+		const remaining = origin ? [...located] : located.slice(1);
+		const ordered = origin ? [] : [located[0]];
+
+		while (remaining.length > 0) {
+			let bestIndex = 0;
+			let bestKm = Number.POSITIVE_INFINITY;
+			for (let i = 0; i < remaining.length; i++) {
+				const candidate = remaining[i];
+				const km = haversineKm(
+					current.lat,
+					current.lon,
+					candidate.snapshot_lat,
+					candidate.snapshot_lon
+				);
+				if (km < bestKm) {
+					bestKm = km;
+					bestIndex = i;
+				}
+			}
+			const [next] = remaining.splice(bestIndex, 1);
+			ordered.push(next);
+			current = { lat: next.snapshot_lat, lon: next.snapshot_lon };
+		}
+
+		const orderedIds = [...ordered.map((r) => r.id), ...unlocated.map((r) => r.id)];
+		for (let i = 0; i < orderedIds.length; i++) {
+			await client.query(`UPDATE day_plan_stops SET sort_order = $2 WHERE id = $1`, [
+				orderedIds[i],
+				i
+			]);
+		}
+		await clearDrivingForPlan(client, planId);
+		await client.query(`UPDATE day_plans SET updated_at = NOW() WHERE id = $1`, [planId]);
+		return orderedIds;
+	});
 }

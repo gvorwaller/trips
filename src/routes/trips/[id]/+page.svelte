@@ -1,7 +1,8 @@
 <script lang="ts">
-	import { enhance } from '$app/forms';
+	import { deserialize, enhance } from '$app/forms';
 	import { invalidateAll } from '$app/navigation';
 	import { browser } from '$app/environment';
+	import { env } from '$env/dynamic/public';
 	import { flushSync, onMount } from 'svelte';
 	import AttachmentDownloadButton from '$components/AttachmentDownloadButton.svelte';
 	import PinMap from '$components/PinMap.svelte';
@@ -14,18 +15,27 @@
 		dayPlanDirectionsLink,
 		type MapPlace
 	} from '$lib/maplinks';
-	import { haversineKm, formatKm } from '$lib/geo';
+	import { haversineKm, formatKm, formatDuration } from '$lib/geo';
+	import {
+		computeLegDistances,
+		optimizeDrivingRoute,
+		straightLineOptimize,
+		type DrivingLeg,
+		type RouteStop
+	} from '$lib/route';
 	import type { PageData } from './$types';
 
 	let { data }: { data: PageData } = $props();
 	const isViewer = $derived(data.user?.role === 'viewer');
+	const MAPS_API_KEY = env.PUBLIC_GOOGLE_MAPS_API_KEY ?? '';
 	let selectedPin = $state<number | null>(null);
 
 	// Inline "insert item above/below this row" (td-4aa8c4). Clicking a row's ＋
 	// opens a one-off input positioned exactly where the new item will land, so a
 	// mid-list item arrives in place without repeated move-up/down clicks.
 	let packInsert = $state<{ refId: number; position: 'above' | 'below' } | null>(null);
-	const openInsert = (refId: number, position: 'above' | 'below') => (packInsert = { refId, position });
+	const openInsert = (refId: number, position: 'above' | 'below') =>
+		(packInsert = { refId, position });
 	const isInserting = (refId: number, position: 'above' | 'below') =>
 		packInsert?.refId === refId && packInsert?.position === position;
 	// Focus the field as soon as the inline insert form appears.
@@ -205,11 +215,10 @@
 		duplicate?: boolean;
 		duplicate_title?: string | null;
 	}
-	interface ItinCandidate
-		extends Omit<
-			ItinCandidateRaw,
-			'date' | 'notes' | 'external_url' | 'address' | 'location_query' | 'children'
-		> {
+	interface ItinCandidate extends Omit<
+		ItinCandidateRaw,
+		'date' | 'notes' | 'external_url' | 'address' | 'location_query' | 'children'
+	> {
 		date: string;
 		notes: string;
 		external_url: string;
@@ -233,9 +242,7 @@
 	let itinImageExtracting = $state(false);
 	let itinImageMsg = $state('');
 	const itinImportParents = $derived(
-		data.itineraryRows.filter((r) =>
-			['day', 'section', 'place'].includes(r.node.item_type)
-		)
+		data.itineraryRows.filter((r) => ['day', 'section', 'place'].includes(r.node.item_type))
 	);
 
 	function isItinDescendant(candidateId: number, ancestorId: number): boolean {
@@ -248,9 +255,7 @@
 	}
 
 	function itinMoveParentsFor(id: number) {
-		return itinImportParents.filter(
-			({ node }) => node.id !== id && !isItinDescendant(node.id, id)
-		);
+		return itinImportParents.filter(({ node }) => node.id !== id && !isItinDescendant(node.id, id));
 	}
 
 	function withItinSelection(raw: ItinCandidateRaw[]): ItinCandidate[] {
@@ -333,8 +338,7 @@
 	};
 	let pendingDelete = $state<PendingDelete | null>(null);
 
-	const itinHasChildren = (id: number) =>
-		data.itineraryRows.some((r) => r.node.parent_id === id);
+	const itinHasChildren = (id: number) => data.itineraryRows.some((r) => r.node.parent_id === id);
 
 	type ItinNode = PageData['itineraryRows'][number]['node'];
 	type DayPlanStop = PageData['dayPlanStops'][number];
@@ -381,11 +385,37 @@
 	let dayPlanNotes = $state('');
 	let dayPlanStops = $state<BuilderStop[]>([]);
 	let dayPlanAddPlaceId = $state('');
+	let dayPlanSearch = $state('');
+	let dayPlanRouteBusy = $state<number | 'builder' | null>(null);
+	let dayPlanRouteStatus = $state<Record<number, string>>({});
+	let savedPlanAnchors = $state<Record<number, string>>({});
+	let builderAnchor = $state('none');
+	let builderRouteSummary = $state('');
+
+	let aiNotesBusy = $state<number | null>(null);
+	let aiNotesError = $state<Record<number, string>>({});
+
+	type Suggestion = {
+		source: 'internal' | 'external';
+		name: string;
+		lat: number;
+		lng: number;
+		distance_km: number;
+		itinerary_item_id?: number;
+		vicinity: string | null;
+	};
+	let suggestBusy = $state<number | null>(null);
+	let suggestions = $state<Record<number, { internal: Suggestion[]; external: Suggestion[] }>>({});
 
 	const dayPlanPlaces = $derived(data.itineraryRows.filter((r) => r.node.item_type === 'place'));
 	const dayPlanParents = $derived(
 		data.itineraryRows.filter((r) => r.node.item_type === 'day' || r.node.item_type === 'section')
 	);
+	const dayPlanPlacesFiltered = $derived.by(() => {
+		const q = dayPlanSearch.toLowerCase().trim();
+		if (!q) return dayPlanPlaces;
+		return dayPlanPlaces.filter((r) => r.node.title.toLowerCase().includes(q));
+	});
 
 	function stopPlace(stop: BuilderStop): MapPlace {
 		return { name: stop.title, lat: stop.lat, lon: stop.lon, place_id: stop.place_id };
@@ -398,6 +428,88 @@
 			lon: stop.snapshot_lon,
 			place_id: stop.snapshot_place_id
 		};
+	}
+
+	type AnchorOption = {
+		value: string;
+		label: string;
+		lat: number | null;
+		lon: number | null;
+	};
+
+	function normTitle(s: string): string {
+		return s
+			.toLowerCase()
+			.replace(/[^a-z0-9]+/g, ' ')
+			.trim();
+	}
+
+	function dateMatchesReservation(
+		planDate: string | null,
+		reservation: PageData['reservations'][number]
+	) {
+		if (!planDate || (!reservation.start_at && !reservation.end_at)) return true;
+		const start = reservation.start_at?.slice(0, 10) ?? null;
+		const end = reservation.end_at?.slice(0, 10) ?? start;
+		if (!start) return true;
+		return planDate >= start && planDate <= (end ?? start);
+	}
+
+	function matchingPlaceForReservation(reservation: PageData['reservations'][number]) {
+		const target = normTitle(reservation.title);
+		return dayPlanPlaces.find(({ node }) => {
+			if (node.lat == null || node.lon == null) return false;
+			const place = normTitle(node.title);
+			return place === target || place.includes(target) || target.includes(place);
+		});
+	}
+
+	function anchorOptions(planDate: string | null): AnchorOption[] {
+		const options: AnchorOption[] = [{ value: 'none', label: 'No anchor', lat: null, lon: null }];
+		for (const reservation of data.reservations) {
+			if (
+				reservation.reservation_type !== 'accommodation' ||
+				!dateMatchesReservation(planDate, reservation)
+			) {
+				continue;
+			}
+			const place = matchingPlaceForReservation(reservation);
+			if (place?.node.lat != null && place.node.lon != null) {
+				options.push({
+					value: `res:${reservation.id}`,
+					label: `Stay: ${reservation.title}`,
+					lat: place.node.lat,
+					lon: place.node.lon
+				});
+			}
+		}
+		for (const { node } of dayPlanPlaces) {
+			if (node.lat == null || node.lon == null) continue;
+			options.push({
+				value: `place:${node.id}`,
+				label: `Place: ${node.title}`,
+				lat: node.lat,
+				lon: node.lon
+			});
+		}
+		return options;
+	}
+
+	function anchorFromValue(value: string, planDate: string | null) {
+		const option = anchorOptions(planDate).find((o) => o.value === value);
+		return option?.lat != null && option.lon != null ? { lat: option.lat, lon: option.lon } : null;
+	}
+
+	function weatherPeriodsForPlan(
+		weather: NonNullable<PageData['weatherByPlan']>[number],
+		planDate: string | null
+	) {
+		if (!planDate) return weather.periods.filter((p) => p.isDaytime).slice(0, 2);
+		const dated = weather.periods.filter((p) => p.startTime?.slice(0, 10) === planDate);
+		const daytime = dated.filter((p) => p.isDaytime);
+		if (daytime.length > 0) return daytime.slice(0, 3);
+		if (dated.length > 0) return dated.slice(0, 3);
+		return weather.periods.filter((p) => p.isDaytime).slice(0, 2);
 	}
 
 	function stopsForPlan(planId: number): DayPlanStop[] {
@@ -428,6 +540,286 @@
 		return legs > 0 ? formatKm(km) : null;
 	}
 
+	function savedRouteStops(stops: DayPlanStop[]): RouteStop[] {
+		return stops.map((s) => ({ id: s.id, lat: s.snapshot_lat, lon: s.snapshot_lon }));
+	}
+
+	function builderRouteStops(): RouteStop[] {
+		return dayPlanStops.map((s) => ({ id: s.itinerary_item_id, lat: s.lat, lon: s.lon }));
+	}
+
+	function locatedCount(stops: RouteStop[]): number {
+		return stops.filter((s) => typeof s.lat === 'number' && typeof s.lon === 'number').length;
+	}
+
+	function allStopsLocated(stops: RouteStop[]): boolean {
+		return (
+			stops.length > 0 && stops.every((s) => typeof s.lat === 'number' && typeof s.lon === 'number')
+		);
+	}
+
+	function canCalculateDriving(stops: DayPlanStop[]): boolean {
+		const routeStops = savedRouteStops(stops);
+		return routeStops.length >= 2 && allStopsLocated(routeStops);
+	}
+
+	function canOptimizeRoute(stops: RouteStop[]): boolean {
+		return locatedCount(stops) >= 3;
+	}
+
+	function canSuggestStops(stops: DayPlanStop[]): boolean {
+		return locatedCount(savedRouteStops(stops)) >= 2;
+	}
+
+	function orderSavedStops(stops: DayPlanStop[], orderedIds: number[]): DayPlanStop[] {
+		const byId = new Map(stops.map((s) => [s.id, s]));
+		return orderedIds.map((id) => byId.get(id)).filter((s): s is DayPlanStop => !!s);
+	}
+
+	function orderBuilderStops(orderedIds: number[]): BuilderStop[] {
+		const byId = new Map(dayPlanStops.map((s) => [s.itinerary_item_id, s]));
+		return orderedIds.map((id) => byId.get(id)).filter((s): s is BuilderStop => !!s);
+	}
+
+	function persistedDrivingSummary(stops: DayPlanStop[]): string | null {
+		const legs = stops.slice(1);
+		if (legs.length === 0 || !legs.every((s) => s.drive_km != null && s.drive_min != null)) {
+			return null;
+		}
+		const km = legs.reduce((sum, s) => sum + (s.drive_km ?? 0), 0);
+		const min = legs.reduce((sum, s) => sum + (s.drive_min ?? 0), 0);
+		return `${formatKm(km)}, ${formatDuration(min)}`;
+	}
+
+	function routeSummary(stops: DayPlanStop[]): string | null {
+		const driving = persistedDrivingSummary(stops);
+		if (driving) return driving;
+		const straight = routeDistance(stops.map(savedStopPlace));
+		return straight ? `~${straight} straight-line` : null;
+	}
+
+	function legSummary(prev: DayPlanStop | null, stop: DayPlanStop): string | null {
+		if (stop.drive_km != null && stop.drive_min != null) {
+			return `${formatKm(stop.drive_km)}, ${formatDuration(stop.drive_min)}`;
+		}
+		if (
+			prev &&
+			typeof prev.snapshot_lat === 'number' &&
+			typeof prev.snapshot_lon === 'number' &&
+			typeof stop.snapshot_lat === 'number' &&
+			typeof stop.snapshot_lon === 'number'
+		) {
+			return `~${formatKm(
+				haversineKm(prev.snapshot_lat, prev.snapshot_lon, stop.snapshot_lat, stop.snapshot_lon)
+			)} straight-line`;
+		}
+		return null;
+	}
+
+	function setRouteStatus(planId: number, message: string) {
+		dayPlanRouteStatus = { ...dayPlanRouteStatus, [planId]: message };
+	}
+
+	type ActionData = { ok?: boolean; orderedStopIds?: number[]; error?: string };
+
+	async function postAction(action: string, fd: FormData): Promise<ActionData> {
+		const response = await fetch(`?/${action}`, {
+			method: 'POST',
+			body: fd,
+			headers: {
+				accept: 'application/json',
+				'x-sveltekit-action': 'true'
+			}
+		});
+		const result = deserialize(await response.text());
+		if (result.type === 'success') return (result.data ?? {}) as ActionData;
+		if (result.type === 'failure') {
+			throw new Error(((result.data ?? {}) as ActionData).error ?? 'Action failed.');
+		}
+		throw new Error('Action failed.');
+	}
+
+	async function persistDriving(planId: number, stops: DayPlanStop[]): Promise<void> {
+		const legs = await computeLegDistances(MAPS_API_KEY, savedRouteStops(stops));
+		const fd = new FormData();
+		fd.set('plan_id', String(planId));
+		fd.set('legs', JSON.stringify(legs));
+		await postAction('dayplan-set-driving', fd);
+	}
+
+	async function calculateSavedDriving(planId: number, stops = stopsForPlan(planId)) {
+		if (!MAPS_API_KEY) {
+			setRouteStatus(planId, 'Google Maps key is not configured.');
+			return;
+		}
+		dayPlanRouteBusy = planId;
+		try {
+			await persistDriving(planId, stops);
+			setRouteStatus(planId, 'Driving distances updated.');
+			await invalidateAll();
+		} catch (err) {
+			setRouteStatus(
+				planId,
+				err instanceof Error ? err.message : 'Could not calculate driving distances.'
+			);
+		} finally {
+			dayPlanRouteBusy = null;
+		}
+	}
+
+	async function optimizeSavedPlan(
+		planId: number,
+		planDate: string | null,
+		selectedAnchor: string,
+		stops: DayPlanStop[]
+	) {
+		const anchor = anchorFromValue(selectedAnchor || 'none', planDate);
+		dayPlanRouteBusy = planId;
+		try {
+			let orderedIds: number[] | undefined;
+			if (MAPS_API_KEY) {
+				try {
+					const optimized = await optimizeDrivingRoute(MAPS_API_KEY, {
+						anchor,
+						stops: savedRouteStops(stops)
+					});
+					orderedIds = optimized.orderedIds;
+				} catch {
+					// Fall through to the server-side nearest-neighbor fallback.
+				}
+			}
+
+			if (!orderedIds) {
+				const fallbackFd = new FormData();
+				fallbackFd.set('plan_id', String(planId));
+				if (anchor) {
+					fallbackFd.set('origin_lat', String(anchor.lat));
+					fallbackFd.set('origin_lon', String(anchor.lon));
+				}
+				const fallback = await postAction('dayplan-optimize-fallback', fallbackFd);
+				orderedIds = fallback.orderedStopIds;
+				if (!orderedIds) throw new Error('Could not optimize stop order.');
+			} else {
+				const orderFd = new FormData();
+				orderFd.set('plan_id', String(planId));
+				orderFd.set('ordered_stop_ids', JSON.stringify(orderedIds));
+				await postAction('dayplan-set-order', orderFd);
+			}
+
+			const orderedStops = orderSavedStops(stops, orderedIds);
+			if (MAPS_API_KEY && allStopsLocated(savedRouteStops(orderedStops))) {
+				await persistDriving(planId, orderedStops);
+				setRouteStatus(planId, 'Route optimized and distances updated.');
+			} else if (MAPS_API_KEY) {
+				setRouteStatus(
+					planId,
+					'Route optimized. Add coordinates to every stop to calculate distances.'
+				);
+			} else {
+				setRouteStatus(planId, 'Route optimized using straight-line fallback.');
+			}
+			await invalidateAll();
+		} catch (err) {
+			setRouteStatus(planId, err instanceof Error ? err.message : 'Could not optimize route.');
+		} finally {
+			dayPlanRouteBusy = null;
+		}
+	}
+
+	async function optimizeBuilderStops() {
+		const routeStops = builderRouteStops();
+		if (!canOptimizeRoute(routeStops)) return;
+		const anchor = anchorFromValue(builderAnchor, dayPlanDate || null);
+		dayPlanRouteBusy = 'builder';
+		try {
+			let orderedIds: number[];
+			if (MAPS_API_KEY) {
+				const optimized = await optimizeDrivingRoute(MAPS_API_KEY, { anchor, stops: routeStops });
+				orderedIds = optimized.orderedIds;
+				builderRouteSummary = `${formatKm(optimized.totalKm)}, ${formatDuration(optimized.totalMin)}`;
+			} else {
+				orderedIds = straightLineOptimize(routeStops, anchor);
+				builderRouteSummary = routeDistance(orderBuilderStops(orderedIds).map(stopPlace)) ?? '';
+			}
+			dayPlanStops = orderBuilderStops(orderedIds);
+		} catch {
+			const orderedIds = straightLineOptimize(routeStops, anchor);
+			dayPlanStops = orderBuilderStops(orderedIds);
+			builderRouteSummary = routeDistance(dayPlanStops.map(stopPlace)) ?? '';
+		} finally {
+			dayPlanRouteBusy = null;
+		}
+	}
+
+	async function fetchAiNotes(planId: number) {
+		aiNotesBusy = planId;
+		aiNotesError = { ...aiNotesError, [planId]: '' };
+		try {
+			const fd = new FormData();
+			fd.set('plan_id', String(planId));
+			await postAction('dayplan-ai-notes', fd);
+			await invalidateAll();
+		} catch (err) {
+			aiNotesError = {
+				...aiNotesError,
+				[planId]: err instanceof Error ? err.message : 'Could not generate notes.'
+			};
+		} finally {
+			aiNotesBusy = null;
+		}
+	}
+
+	async function fetchSuggestions(planId: number) {
+		suggestBusy = planId;
+		try {
+			const fd = new FormData();
+			fd.set('plan_id', String(planId));
+			const result = (await postAction('dayplan-suggest', fd)) as ActionData & {
+				internal?: Suggestion[];
+				external?: Suggestion[];
+			};
+			suggestions = {
+				...suggestions,
+				[planId]: {
+					internal: result.internal ?? [],
+					external: result.external ?? []
+				}
+			};
+		} catch (err) {
+			suggestions = { ...suggestions, [planId]: { internal: [], external: [] } };
+			aiNotesError = {
+				...aiNotesError,
+				[planId]: err instanceof Error ? err.message : 'Could not load suggestions.'
+			};
+		} finally {
+			suggestBusy = null;
+		}
+	}
+
+	async function addSuggestionAsStop(planId: number, sug: Suggestion) {
+		const fd = new FormData();
+		fd.set('plan_id', String(planId));
+		fd.set('name', sug.name);
+		fd.set('lat', String(sug.lat));
+		fd.set('lng', String(sug.lng));
+		fd.set('vicinity', sug.vicinity ?? '');
+		if (sug.source === 'internal' && sug.itinerary_item_id) {
+			fd.set('itinerary_item_id', String(sug.itinerary_item_id));
+		}
+		await postAction('dayplan-add-suggestion', fd);
+		await invalidateAll();
+		if (suggestions[planId]) {
+			const s = suggestions[planId];
+			suggestions = {
+				...suggestions,
+				[planId]: {
+					internal: s.internal.filter((i) => i.name !== sug.name),
+					external: s.external.filter((i) => i.name !== sug.name)
+				}
+			};
+		}
+	}
+
 	const builderRoute = $derived(googleDayDirectionsLink(dayPlanStops.map(stopPlace)));
 	const builderLegs = $derived(googleLegByLegLinks(dayPlanStops.map(stopPlace)));
 	const builderDistance = $derived(routeDistance(dayPlanStops.map(stopPlace)));
@@ -446,6 +838,9 @@
 		dayPlanNotes = '';
 		dayPlanStops = [];
 		dayPlanAddPlaceId = '';
+		dayPlanSearch = '';
+		builderAnchor = 'none';
+		builderRouteSummary = '';
 	}
 
 	function openDayPlanBuilder() {
@@ -466,6 +861,7 @@
 				place_id: row.node.place_id
 			}
 		];
+		builderRouteSummary = '';
 	}
 
 	function addSelectedBuilderPlace() {
@@ -491,10 +887,12 @@
 		const next = [...dayPlanStops];
 		[next[index], next[target]] = [next[target], next[index]];
 		dayPlanStops = next;
+		builderRouteSummary = '';
 	}
 
 	function removeBuilderStop(index: number) {
 		dayPlanStops = dayPlanStops.filter((_, i) => i !== index);
+		builderRouteSummary = '';
 	}
 
 	async function toggleVisited(id: number, visited: boolean) {
@@ -632,7 +1030,10 @@
 	// some → indeterminate, none → unchecked — with no extra writes (so the
 	// viewer's single-write constraint holds). The same formula collapses to a
 	// leaf's own state, and a packing list's progress = its roots' totals.
-	type PackRow = { node: { id: number; parent_id: number | null; checked: boolean }; depth: number };
+	type PackRow = {
+		node: { id: number; parent_id: number | null; checked: boolean };
+		depth: number;
+	};
 	function leafStats(rows: PackRow[]): Map<number, { leaves: number; checked: number }> {
 		const kids = childMap(rows);
 		const byId = new Map(rows.map((r) => [r.node.id, r.node]));
@@ -679,7 +1080,12 @@
 	const toggleItin = (id: number) => (itinCollapsed = toggled(itinCollapsed, itinKey, id));
 	const togglePack = (id: number) => (packCollapsed = toggled(packCollapsed, packKey, id));
 
-	function bulkFold(set: Set<number>, key: string, ids: Set<number>, collapse: boolean): Set<number> {
+	function bulkFold(
+		set: Set<number>,
+		key: string,
+		ids: Set<number>,
+		collapse: boolean
+	): Set<number> {
 		const next = new Set(set);
 		for (const id of ids) {
 			if (collapse) next.add(id);
@@ -688,8 +1094,10 @@
 		saveIds(key, next);
 		return next;
 	}
-	const collapseAllItin = () => (itinCollapsed = bulkFold(itinCollapsed, itinKey, itinParents, true));
-	const expandAllItin = () => (itinCollapsed = bulkFold(itinCollapsed, itinKey, itinParents, false));
+	const collapseAllItin = () =>
+		(itinCollapsed = bulkFold(itinCollapsed, itinKey, itinParents, true));
+	const expandAllItin = () =>
+		(itinCollapsed = bulkFold(itinCollapsed, itinKey, itinParents, false));
 	const collapsePack = (rows: TreeRow[]) =>
 		(packCollapsed = bulkFold(packCollapsed, packKey, parentIds(rows), true));
 	const expandPack = (rows: TreeRow[]) =>
@@ -701,8 +1109,12 @@
 	onMount(() => {
 		try {
 			const v = JSON.parse(localStorage.getItem(sectionKey) ?? '[]');
-			sectionsCollapsed = new Set(Array.isArray(v) ? v.filter((s: unknown) => typeof s === 'string') : []);
-		} catch { /* use empty set */ }
+			sectionsCollapsed = new Set(
+				Array.isArray(v) ? v.filter((s: unknown) => typeof s === 'string') : []
+			);
+		} catch {
+			/* use empty set */
+		}
 	});
 	function saveSections(s: Set<string>) {
 		if (browser) localStorage.setItem(sectionKey, JSON.stringify([...s]));
@@ -873,7 +1285,8 @@
 					{@const stops = stopsForPlan(plan.id)}
 					{@const directions = dayPlanDirectionsLink(stops)}
 					{@const legLinks = googleLegByLegLinks(stops.map(savedStopPlace))}
-					{@const distance = routeDistance(stops.map(savedStopPlace))}
+					{@const summary = routeSummary(stops)}
+					{@const weather = data.weatherByPlan?.[plan.id]}
 					<article class="dayplan-card">
 						<div class="dayplan-head">
 							<div class="grow">
@@ -888,9 +1301,32 @@
 										-
 									{/if}
 									{stops.length} stop{stops.length === 1 ? '' : 's'} - {planProgress(stops)}
-									{#if distance} - ~{distance}{/if}
+									{#if summary}
+										- {summary}{/if}
 								</div>
 								{#if plan.notes}<div class="meta">{plan.notes}</div>{/if}
+								{#if weather}
+									<div class="weather-strip" class:stale={weather.stale}>
+										{#if weather.locationLabel}
+											<span class="weather-loc">{weather.locationLabel}</span>
+										{/if}
+										{#each weatherPeriodsForPlan(weather, plan.optional_date) as period}
+											<span class="weather-period">
+												<strong>{period.name}</strong>
+												{period.tempF}°F
+												{period.shortForecast}
+												{#if period.precipPct != null && period.precipPct > 0}
+													({period.precipPct}% precip)
+												{/if}
+												{period.windSpeed}
+												{period.windDirection}
+											</span>
+										{/each}
+										{#if weather.stale}
+											<span class="weather-stale-badge">stale</span>
+										{/if}
+									</div>
+								{/if}
 							</div>
 							<div class="dayplan-actions">
 								{#if directions}
@@ -928,9 +1364,54 @@
 							{#if stops.length === 0}
 								<p class="muted">No stops saved.</p>
 							{:else}
+								{#if !isViewer}
+									<div class="route-tools">
+										<select
+											aria-label="route anchor"
+											value={savedPlanAnchors[plan.id] ?? 'none'}
+											onchange={(e) =>
+												(savedPlanAnchors = {
+													...savedPlanAnchors,
+													[plan.id]: e.currentTarget.value
+												})}
+										>
+											{#each anchorOptions(plan.optional_date) as anchor (anchor.value)}
+												<option value={anchor.value}>{anchor.label}</option>
+											{/each}
+										</select>
+										<button
+											class="btn small"
+											type="button"
+											disabled={!canCalculateDriving(stops) || dayPlanRouteBusy === plan.id}
+											onclick={() => calculateSavedDriving(plan.id, stops)}
+										>
+											{dayPlanRouteBusy === plan.id ? 'Working...' : 'Calculate distances'}
+										</button>
+										<button
+											class="btn small primary"
+											type="button"
+											disabled={!canOptimizeRoute(savedRouteStops(stops)) ||
+												dayPlanRouteBusy === plan.id}
+											onclick={() =>
+												optimizeSavedPlan(
+													plan.id,
+													plan.optional_date,
+													savedPlanAnchors[plan.id] ?? 'none',
+													stops
+												)}
+										>
+											Optimize order
+										</button>
+									</div>
+									{#if dayPlanRouteStatus[plan.id]}
+										<p class="route-status">{dayPlanRouteStatus[plan.id]}</p>
+									{/if}
+								{/if}
 								<ol class="dayplan-stops">
 									{#each stops as stop, i (stop.id)}
+										{@const leg = i > 0 ? legSummary(stops[i - 1], stop) : null}
 										<li>
+											{#if leg}<div class="drive-leg">Drive from previous: {leg}</div>{/if}
 											<div class="dayplan-stop-row">
 												<label class="dayplan-visited">
 													<input
@@ -960,7 +1441,12 @@
 															disabled={i === stops.length - 1}
 															onclick={() => reorderSavedStop(plan.id, stop.id, 1)}>↓</button
 														>
-														<form method="POST" action="?/dayplan-remove-stop" use:enhance class="inline">
+														<form
+															method="POST"
+															action="?/dayplan-remove-stop"
+															use:enhance
+															class="inline"
+														>
 															<input type="hidden" name="id" value={stop.id} />
 															<button type="submit" class="del">Remove</button>
 														</form>
@@ -968,6 +1454,7 @@
 												</div>
 											</div>
 											{#if stop.notes}<div class="meta dayplan-stop-note">{stop.notes}</div>{/if}
+											{#if stop.ai_notes}<div class="ai-note">{stop.ai_notes}</div>{/if}
 											{#if !isViewer}
 												<form
 													method="POST"
@@ -1000,21 +1487,95 @@
 							{/if}
 
 							{#if !isViewer}
+								<div class="dayplan-ai-tools">
+									<button
+										class="btn small"
+										type="button"
+										disabled={aiNotesBusy === plan.id || stops.length === 0}
+										onclick={() => fetchAiNotes(plan.id)}
+									>
+										{aiNotesBusy === plan.id ? 'Generating...' : 'Get visit notes'}
+									</button>
+									<button
+										class="btn small"
+										type="button"
+										disabled={suggestBusy === plan.id || !canSuggestStops(stops)}
+										onclick={() => fetchSuggestions(plan.id)}
+									>
+										{suggestBusy === plan.id ? 'Loading...' : 'Suggest stops'}
+									</button>
+								</div>
+								{#if aiNotesError[plan.id]}
+									<p class="field-error">{aiNotesError[plan.id]}</p>
+								{/if}
+								{#if suggestions[plan.id]}
+									{@const s = suggestions[plan.id]}
+									{#if s.internal.length > 0 || s.external.length > 0}
+										<div class="suggestions-panel">
+											{#if s.internal.length > 0}
+												<p class="suggestions-heading">From your itinerary</p>
+												{#each s.internal as sug}
+													<div class="suggestion-row">
+														<span class="grow"
+															>{sug.name}<span class="muted">
+																— {formatKm(sug.distance_km)} from route{#if sug.vicinity}
+																	— {sug.vicinity}{/if}</span
+															></span
+														>
+														<button
+															class="btn small"
+															type="button"
+															onclick={() => addSuggestionAsStop(plan.id, sug)}>Add</button
+														>
+													</div>
+												{/each}
+											{/if}
+											{#if s.external.length > 0}
+												<p class="suggestions-heading">Nearby discoveries</p>
+												{#each s.external as sug}
+													<div class="suggestion-row">
+														<span class="grow"
+															>{sug.name}<span class="muted">
+																— {formatKm(sug.distance_km)} from route{#if sug.vicinity}
+																	— {sug.vicinity}{/if}</span
+															></span
+														>
+														<button
+															class="btn small"
+															type="button"
+															onclick={() => addSuggestionAsStop(plan.id, sug)}>Add</button
+														>
+													</div>
+												{/each}
+											{/if}
+										</div>
+									{:else}
+										<p class="muted">No suggestions found nearby.</p>
+									{/if}
+								{/if}
+
 								<details class="edit">
 									<summary>edit plan</summary>
 									<form method="POST" action="?/dayplan-edit" use:enhance class="edit-form">
 										<input type="hidden" name="id" value={plan.id} />
 										<input name="title" value={plan.title} placeholder="Title" required />
 										<input name="optional_date" type="date" value={plan.optional_date ?? ''} />
-										<textarea name="notes" rows="2" placeholder="Notes">{plan.notes ?? ''}</textarea>
+										<textarea name="notes" rows="2" placeholder="Notes">{plan.notes ?? ''}</textarea
+										>
 										<button class="btn small primary" type="submit">Save</button>
 									</form>
 								</details>
 								<form method="POST" action="?/dayplan-add-stop" use:enhance class="add-row">
 									<input type="hidden" name="plan_id" value={plan.id} />
+									<input
+										type="search"
+										placeholder="Filter places…"
+										bind:value={dayPlanSearch}
+										class="dayplan-search"
+									/>
 									<select name="itinerary_item_id" required aria-label="place">
 										<option value="">Add a place...</option>
-										{#each dayPlanPlaces as { node, depth } (node.id)}
+										{#each dayPlanPlacesFiltered as { node, depth } (node.id)}
 											<option value={node.id}>{'· '.repeat(depth)}{node.title}</option>
 										{/each}
 									</select>
@@ -1048,12 +1609,19 @@
 					<input name="title" placeholder="Title (required)" required bind:value={dayPlanTitle} />
 					<input name="optional_date" type="date" bind:value={dayPlanDate} />
 				</div>
-				<textarea name="notes" rows="2" placeholder="Plan notes" bind:value={dayPlanNotes}></textarea>
+				<textarea name="notes" rows="2" placeholder="Plan notes" bind:value={dayPlanNotes}
+				></textarea>
 
 				<div class="dayplan-picker">
+					<input
+						type="search"
+						placeholder="Filter places…"
+						bind:value={dayPlanSearch}
+						class="dayplan-search"
+					/>
 					<select bind:value={dayPlanAddPlaceId} aria-label="place">
 						<option value="">Choose a place...</option>
-						{#each dayPlanPlaces as { node, depth } (node.id)}
+						{#each dayPlanPlacesFiltered as { node, depth } (node.id)}
 							<option
 								value={String(node.id)}
 								disabled={dayPlanStops.some((s) => s.itinerary_item_id === node.id)}
@@ -1075,7 +1643,11 @@
 					<div class="quick-groups">
 						{#each dayPlanParents as { node } (node.id)}
 							{#if directChildPlaces(node.id).length > 0}
-								<button class="chip-action" type="button" onclick={() => startDayPlanFromParent(node)}>
+								<button
+									class="chip-action"
+									type="button"
+									onclick={() => startDayPlanFromParent(node)}
+								>
 									{node.title}
 								</button>
 							{/if}
@@ -1084,6 +1656,24 @@
 				{/if}
 
 				{#if dayPlanStops.length > 0}
+					<div class="route-tools">
+						<select bind:value={builderAnchor} aria-label="route anchor">
+							{#each anchorOptions(dayPlanDate || null) as anchor (anchor.value)}
+								<option value={anchor.value}>{anchor.label}</option>
+							{/each}
+						</select>
+						<button
+							class="btn small primary"
+							type="button"
+							disabled={!canOptimizeRoute(builderRouteStops()) || dayPlanRouteBusy === 'builder'}
+							onclick={optimizeBuilderStops}
+						>
+							{dayPlanRouteBusy === 'builder' ? 'Working...' : 'Optimize order'}
+						</button>
+						{#if builderRouteSummary}
+							<span class="route-status">Total: {builderRouteSummary}</span>
+						{/if}
+					</div>
 					<ol class="builder-stops">
 						{#each dayPlanStops as stop, i (stop.itinerary_item_id)}
 							<li>
@@ -1102,14 +1692,16 @@
 										disabled={i === dayPlanStops.length - 1}
 										onclick={() => moveBuilderStop(i, 1)}>↓</button
 									>
-									<button type="button" class="del" onclick={() => removeBuilderStop(i)}>Remove</button>
+									<button type="button" class="del" onclick={() => removeBuilderStop(i)}
+										>Remove</button
+									>
 								</div>
 							</li>
 						{/each}
 					</ol>
 					<div class="dayplan-preview">
 						<span>{dayPlanStops.length} stop{dayPlanStops.length === 1 ? '' : 's'}</span>
-						{#if builderDistance}<span>~{builderDistance}</span>{/if}
+						{#if builderDistance}<span>~{builderDistance} straight-line</span>{/if}
 						{#if builderRoute}
 							<a class="chip-link route" href={builderRoute} target="_blank" rel="noopener"
 								>Open as one route</a
@@ -1156,399 +1748,425 @@
 	</button>
 
 	{#if !sectionsCollapsed.has('places')}
-	{#if data.itineraryRows.length > 0}
-		<PinMap {pins} onselect={selectPin} />
-	{/if}
-
-	{#if data.itineraryRows.length === 0}
-		<p class="muted">No places yet.</p>
-	{:else}
-		{#if itinParents.size > 0}
-			<div class="tree-tools">
-				<button type="button" class="linkbtn" onclick={collapseAllItin}>Collapse all</button>
-				<span class="sep" aria-hidden="true">·</span>
-				<button type="button" class="linkbtn" onclick={expandAllItin}>Expand all</button>
-			</div>
+		{#if data.itineraryRows.length > 0}
+			<PinMap {pins} onselect={selectPin} />
 		{/if}
-		<ul class="outline">
-			{#each data.itineraryRows as { node, depth } (node.id)}
-				{#if !itinHidden.has(node.id)}
-					{@const route =
-						node.item_type === 'day' || node.item_type === 'section'
-							? dayDirections(node.id)
-							: null}
-					<li
-						id="itin-{node.id}"
-						style="padding-left: {depth * 22}px"
-						class:flash={selectedPin === node.id}
-					>
-						<div class="line">
-							{#if itinParents.has(node.id)}
-								<button
-									class="caret"
-									type="button"
-									aria-expanded={!itinCollapsed.has(node.id)}
-									aria-label={itinCollapsed.has(node.id) ? 'Expand' : 'Collapse'}
-									onclick={() => toggleItin(node.id)}>{itinCollapsed.has(node.id) ? '▸' : '▾'}</button
-								>
-							{:else}
-								<span class="caret-spacer" aria-hidden="true"></span>
-							{/if}
-							<span class="badge {node.item_type === 'place' ? 'seen' : 'need'}"
-								>{node.item_type}</span
-							>
-						<span class="grow">
-							<span class="ttl">{node.title}</span>
-							{#if node.notes}<div class="meta">{node.notes}</div>{/if}
-							<div class="chips">
-								{#if node.item_type === 'place'}
-									<a
-										class="chip-link"
-										href={googleMapsLink(toPlace(node))}
-										target="_blank"
-										rel="noopener">Google</a
-									>
-									<a
-										class="chip-link"
-										href={appleMapsLink(toPlace(node))}
-										target="_blank"
-										rel="noopener">Apple</a
-									>
-									<a
-										class="chip-link"
-										href={googleDirectionsLink(toPlace(node))}
-										target="_blank"
-										rel="noopener">Directions</a
-									>
-								{/if}
-								{#if route}
-									<a class="chip-link route" href={route} target="_blank" rel="noopener"
-										>Route this group</a
-									>
-								{/if}
-								{#if !isViewer && (node.item_type === 'day' || node.item_type === 'section') && directChildPlaces(node.id).length > 0}
-									<button
-										class="chip-action"
-										type="button"
-										onclick={() => startDayPlanFromParent(node)}>Day plan</button
-									>
-								{/if}
-								{#if node.external_url}
-									<a class="chip-link" href={node.external_url} target="_blank" rel="noopener"
-										>Reference</a
-									>
-								{/if}
-								{#if !isViewer && node.item_type === 'place'}
-									<a class="chip-link loc" href="/trips/{data.trip.id}/place/{node.id}">
-										{node.lat != null ? '📍 location' : '＋ location'}
-									</a>
-								{/if}
-							</div>
-						</span>
-						{#if !isViewer}{@render treeControls(
-								node.id,
-								'itin-move',
-								'itin-delete',
-								null,
-								node.title,
-								itinHasChildren(node.id)
-							)}{/if}
-					</div>
-					{#if !isViewer}
-						<details class="edit">
-							<summary>edit</summary>
-							<form
-								method="POST"
-								action="?/itin-edit"
-								use:enhance={() => {
-									return async ({ update }) => {
-										await update({ reset: false });
-									};
-								}}
-								class="edit-form"
-							>
-								<input type="hidden" name="id" value={node.id} />
-								<select name="item_type" aria-label="type">
-									{#each ['place', 'day', 'section', 'note'] as t (t)}
-										<option value={t} selected={node.item_type === t}>{t}</option>
-									{/each}
-								</select>
-								<input name="title" value={node.title} placeholder="Title" />
-								<input
-									name="external_url"
-									value={node.external_url ?? ''}
-									placeholder="Reference URL"
-								/>
-								<input name="date" type="date" value={node.date ?? ''} />
-								<textarea name="notes" rows="2" placeholder="Notes">{node.notes ?? ''}</textarea>
-								<button class="btn small primary" type="submit">Save</button>
-							</form>
-							<form method="POST" action="?/itin-reparent" use:enhance class="move-under-form">
-								<input type="hidden" name="id" value={node.id} />
-								<label>
-									Move under
-									<select name="parent_id">
-										<option value="" selected={node.parent_id === null}>Top level</option>
-										{#each itinMoveParentsFor(node.id) as parentRow (parentRow.node.id)}
-											<option
-												value={String(parentRow.node.id)}
-												selected={node.parent_id === parentRow.node.id}
-											>
-												{'· '.repeat(parentRow.depth)}{parentRow.node.title} ({parentRow.node.item_type})
-											</option>
-										{/each}
-									</select>
-								</label>
-								<button class="btn small" type="submit">Move</button>
-							</form>
-						</details>
-					{/if}
-				</li>
-				{/if}
-			{/each}
-		</ul>
-	{/if}
 
-	{#if !isViewer}
-		<form method="POST" action="?/itin-add" use:enhance class="add-row">
-			<select name="item_type" aria-label="type">
-				<option value="place">place</option>
-				<option value="day">day</option>
-				<option value="section">section</option>
-				<option value="note">note</option>
-			</select>
-			<input name="title" placeholder="Add a place / day / note…" required />
-			<textarea name="notes" rows="2" placeholder="Notes"></textarea>
-			<button class="btn small primary" type="submit">Add</button>
-		</form>
-		<details class="paste">
-			<summary>Paste many (one per line)</summary>
-			<form method="POST" action="?/itin-paste" use:enhance>
-				<input type="hidden" name="item_type" value="place" />
-				<textarea name="text" rows="4" placeholder="Palais des Papes&#10;Pont d'Avignon&#10;…"
-				></textarea>
-				<button class="btn small" type="submit">Add all</button>
+		{#if data.itineraryRows.length === 0}
+			<p class="muted">No places yet.</p>
+		{:else}
+			{#if itinParents.size > 0}
+				<div class="tree-tools">
+					<button type="button" class="linkbtn" onclick={collapseAllItin}>Collapse all</button>
+					<span class="sep" aria-hidden="true">·</span>
+					<button type="button" class="linkbtn" onclick={expandAllItin}>Expand all</button>
+				</div>
+			{/if}
+			<ul class="outline">
+				{#each data.itineraryRows as { node, depth } (node.id)}
+					{#if !itinHidden.has(node.id)}
+						{@const route =
+							node.item_type === 'day' || node.item_type === 'section'
+								? dayDirections(node.id)
+								: null}
+						<li
+							id="itin-{node.id}"
+							style="padding-left: {depth * 22}px"
+							class:flash={selectedPin === node.id}
+						>
+							<div class="line">
+								{#if itinParents.has(node.id)}
+									<button
+										class="caret"
+										type="button"
+										aria-expanded={!itinCollapsed.has(node.id)}
+										aria-label={itinCollapsed.has(node.id) ? 'Expand' : 'Collapse'}
+										onclick={() => toggleItin(node.id)}
+										>{itinCollapsed.has(node.id) ? '▸' : '▾'}</button
+									>
+								{:else}
+									<span class="caret-spacer" aria-hidden="true"></span>
+								{/if}
+								<span class="badge {node.item_type === 'place' ? 'seen' : 'need'}"
+									>{node.item_type}</span
+								>
+								<span class="grow">
+									<span class="ttl">{node.title}</span>
+									{#if node.notes}<div class="meta">{node.notes}</div>{/if}
+									<div class="chips">
+										{#if node.item_type === 'place'}
+											<a
+												class="chip-link"
+												href={googleMapsLink(toPlace(node))}
+												target="_blank"
+												rel="noopener">Google</a
+											>
+											<a
+												class="chip-link"
+												href={appleMapsLink(toPlace(node))}
+												target="_blank"
+												rel="noopener">Apple</a
+											>
+											<a
+												class="chip-link"
+												href={googleDirectionsLink(toPlace(node))}
+												target="_blank"
+												rel="noopener">Directions</a
+											>
+										{/if}
+										{#if route}
+											<a class="chip-link route" href={route} target="_blank" rel="noopener"
+												>Route this group</a
+											>
+										{/if}
+										{#if !isViewer && (node.item_type === 'day' || node.item_type === 'section') && directChildPlaces(node.id).length > 0}
+											<button
+												class="chip-action"
+												type="button"
+												onclick={() => startDayPlanFromParent(node)}>Day plan</button
+											>
+										{/if}
+										{#if node.external_url}
+											<a class="chip-link" href={node.external_url} target="_blank" rel="noopener"
+												>Reference</a
+											>
+										{/if}
+										{#if !isViewer && node.item_type === 'place'}
+											<a class="chip-link loc" href="/trips/{data.trip.id}/place/{node.id}">
+												{node.lat != null ? '📍 location' : '＋ location'}
+											</a>
+										{/if}
+									</div>
+								</span>
+								{#if !isViewer}{@render treeControls(
+										node.id,
+										'itin-move',
+										'itin-delete',
+										null,
+										node.title,
+										itinHasChildren(node.id)
+									)}{/if}
+							</div>
+							{#if !isViewer}
+								<details class="edit">
+									<summary>edit</summary>
+									<form
+										method="POST"
+										action="?/itin-edit"
+										use:enhance={() => {
+											return async ({ update }) => {
+												await update({ reset: false });
+											};
+										}}
+										class="edit-form"
+									>
+										<input type="hidden" name="id" value={node.id} />
+										<select name="item_type" aria-label="type">
+											{#each ['place', 'day', 'section', 'note'] as t (t)}
+												<option value={t} selected={node.item_type === t}>{t}</option>
+											{/each}
+										</select>
+										<input name="title" value={node.title} placeholder="Title" />
+										<input
+											name="external_url"
+											value={node.external_url ?? ''}
+											placeholder="Reference URL"
+										/>
+										<input name="date" type="date" value={node.date ?? ''} />
+										<textarea name="notes" rows="2" placeholder="Notes">{node.notes ?? ''}</textarea
+										>
+										<button class="btn small primary" type="submit">Save</button>
+									</form>
+									<form method="POST" action="?/itin-reparent" use:enhance class="move-under-form">
+										<input type="hidden" name="id" value={node.id} />
+										<label>
+											Move under
+											<select name="parent_id">
+												<option value="" selected={node.parent_id === null}>Top level</option>
+												{#each itinMoveParentsFor(node.id) as parentRow (parentRow.node.id)}
+													<option
+														value={String(parentRow.node.id)}
+														selected={node.parent_id === parentRow.node.id}
+													>
+														{'· '.repeat(parentRow.depth)}{parentRow.node.title} ({parentRow.node
+															.item_type})
+													</option>
+												{/each}
+											</select>
+										</label>
+										<button class="btn small" type="submit">Move</button>
+									</form>
+								</details>
+							{/if}
+						</li>
+					{/if}
+				{/each}
+			</ul>
+		{/if}
+
+		{#if !isViewer}
+			<form method="POST" action="?/itin-add" use:enhance class="add-row">
+				<select name="item_type" aria-label="type">
+					<option value="place">place</option>
+					<option value="day">day</option>
+					<option value="section">section</option>
+					<option value="note">note</option>
+				</select>
+				<input name="title" placeholder="Add a place / day / note…" required />
+				<textarea name="notes" rows="2" placeholder="Notes"></textarea>
+				<button class="btn small primary" type="submit">Add</button>
 			</form>
-		</details>
-		<details class="paste">
-			<summary>Import itinerary from text</summary>
-			<div class="extract">
-				<p class="extract-head">Paste AI output, notes, web text, or bullets. Review before importing.</p>
-				<form
-					method="POST"
-					action="?/itin-extract"
-					class="extract-form"
-					use:enhance={() => {
-						itinExtracting = true;
-						itinExtractMsg = '';
-						return async ({ result }) => {
-							itinExtracting = false;
-							if (result.type === 'success' && result.data?.ok) {
-								const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
-								itinCandidates = withItinSelection(raw);
-								if (raw.length === 0) {
-									itinExtractMsg = 'No itinerary items found in the text.';
-								} else {
-									const dupes = raw.filter((c) => c.duplicate).length;
-									itinExtractMsg = `${raw.length} item${raw.length === 1 ? '' : 's'} found${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
-								}
-							} else if (result.type === 'failure') {
-								itinExtractMsg =
-									(result.data as { error?: string })?.error ?? 'Extraction failed.';
-							} else {
-								itinExtractMsg = 'Extraction failed.';
-							}
-						};
-					}}
-				>
-					<textarea
-						name="text"
-						rows="5"
-						bind:value={itinExtractText}
-						placeholder="Paste rough itinerary text here..."
+			<details class="paste">
+				<summary>Paste many (one per line)</summary>
+				<form method="POST" action="?/itin-paste" use:enhance>
+					<input type="hidden" name="item_type" value="place" />
+					<textarea name="text" rows="4" placeholder="Palais des Papes&#10;Pont d'Avignon&#10;…"
 					></textarea>
-					<button class="btn small" type="submit" disabled={itinExtracting || !itinExtractText.trim()}>
-						{itinExtracting ? 'Extracting...' : 'Extract itinerary'}
-					</button>
+					<button class="btn small" type="submit">Add all</button>
 				</form>
-				{#if itinExtractMsg}<p class="extract-msg">{itinExtractMsg}</p>{/if}
-			</div>
-		</details>
-		<details class="paste">
-			<summary>Import from Google Maps link</summary>
-			<div class="extract">
-				<p class="extract-head">Paste a Google Maps link to extract the place and coordinates.</p>
-				<form
-					method="POST"
-					action="?/itin-extract-url"
-					class="extract-form"
-					use:enhance={() => {
-						itinUrlExtracting = true;
-						itinUrlMsg = '';
-						return async ({ result }) => {
-							itinUrlExtracting = false;
-							if (result.type === 'success' && result.data?.ok) {
-								const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
-								itinCandidates = withItinSelection(raw);
-								if (raw.length === 0) {
-									itinUrlMsg = 'Could not extract a place from that link.';
+			</details>
+			<details class="paste">
+				<summary>Import itinerary from text</summary>
+				<div class="extract">
+					<p class="extract-head">
+						Paste AI output, notes, web text, or bullets. Review before importing.
+					</p>
+					<form
+						method="POST"
+						action="?/itin-extract"
+						class="extract-form"
+						use:enhance={() => {
+							itinExtracting = true;
+							itinExtractMsg = '';
+							return async ({ result }) => {
+								itinExtracting = false;
+								if (result.type === 'success' && result.data?.ok) {
+									const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
+									itinCandidates = withItinSelection(raw);
+									if (raw.length === 0) {
+										itinExtractMsg = 'No itinerary items found in the text.';
+									} else {
+										const dupes = raw.filter((c) => c.duplicate).length;
+										itinExtractMsg = `${raw.length} item${raw.length === 1 ? '' : 's'} found${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+									}
+								} else if (result.type === 'failure') {
+									itinExtractMsg =
+										(result.data as { error?: string })?.error ?? 'Extraction failed.';
 								} else {
-									const dupes = raw.filter((c) => c.duplicate).length;
-									itinUrlMsg = `${raw.length} place${raw.length === 1 ? '' : 's'} found${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+									itinExtractMsg = 'Extraction failed.';
 								}
-							} else if (result.type === 'failure') {
-								itinUrlMsg =
-									(result.data as { error?: string })?.error ?? 'Extraction failed.';
-							} else {
-								itinUrlMsg = 'Extraction failed.';
-							}
-						};
-					}}
-				>
-					<input
-						type="url"
-						name="url"
-						bind:value={itinUrlText}
-						placeholder="https://maps.google.com/... or maps.app.goo.gl/..."
-					/>
-					<button class="btn small" type="submit" disabled={itinUrlExtracting || !itinUrlText.trim()}>
-						{itinUrlExtracting ? 'Extracting...' : 'Extract place'}
-					</button>
-				</form>
-				{#if itinUrlMsg}<p class="extract-msg">{itinUrlMsg}</p>{/if}
-			</div>
-		</details>
-		<details
-			class="paste"
-			ontoggle={(e) => {
-				if ((e.currentTarget as HTMLDetailsElement).open) {
-					const zone = (e.currentTarget as HTMLElement).querySelector('.photo-drop') as HTMLElement | null;
-					zone?.focus();
-				}
-			}}
-		>
-			<summary>Import from photo</summary>
-			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div
-				class="extract photo-drop"
-				tabindex="-1"
-				onpaste={(e) => {
-					const items = e.clipboardData?.items;
-					if (!items) return;
-					for (const item of items) {
-						if (item.type.startsWith('image/')) {
-							e.preventDefault();
-							const file = item.getAsFile();
-							if (!file) return;
-							itinImageFile = file;
-							itinImagePasted = true;
-							const dt = new DataTransfer();
-							dt.items.add(file);
-							const input = (e.currentTarget as HTMLElement).querySelector('input[type="file"]') as HTMLInputElement | null;
-							if (input) input.files = dt.files;
-							return;
-						}
+							};
+						}}
+					>
+						<textarea
+							name="text"
+							rows="5"
+							bind:value={itinExtractText}
+							placeholder="Paste rough itinerary text here..."
+						></textarea>
+						<button
+							class="btn small"
+							type="submit"
+							disabled={itinExtracting || !itinExtractText.trim()}
+						>
+							{itinExtracting ? 'Extracting...' : 'Extract itinerary'}
+						</button>
+					</form>
+					{#if itinExtractMsg}<p class="extract-msg">{itinExtractMsg}</p>{/if}
+				</div>
+			</details>
+			<details class="paste">
+				<summary>Import from Google Maps link</summary>
+				<div class="extract">
+					<p class="extract-head">Paste a Google Maps link to extract the place and coordinates.</p>
+					<form
+						method="POST"
+						action="?/itin-extract-url"
+						class="extract-form"
+						use:enhance={() => {
+							itinUrlExtracting = true;
+							itinUrlMsg = '';
+							return async ({ result }) => {
+								itinUrlExtracting = false;
+								if (result.type === 'success' && result.data?.ok) {
+									const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
+									itinCandidates = withItinSelection(raw);
+									if (raw.length === 0) {
+										itinUrlMsg = 'Could not extract a place from that link.';
+									} else {
+										const dupes = raw.filter((c) => c.duplicate).length;
+										itinUrlMsg = `${raw.length} place${raw.length === 1 ? '' : 's'} found${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+									}
+								} else if (result.type === 'failure') {
+									itinUrlMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
+								} else {
+									itinUrlMsg = 'Extraction failed.';
+								}
+							};
+						}}
+					>
+						<input
+							type="url"
+							name="url"
+							bind:value={itinUrlText}
+							placeholder="https://maps.google.com/... or maps.app.goo.gl/..."
+						/>
+						<button
+							class="btn small"
+							type="submit"
+							disabled={itinUrlExtracting || !itinUrlText.trim()}
+						>
+							{itinUrlExtracting ? 'Extracting...' : 'Extract place'}
+						</button>
+					</form>
+					{#if itinUrlMsg}<p class="extract-msg">{itinUrlMsg}</p>{/if}
+				</div>
+			</details>
+			<details
+				class="paste"
+				ontoggle={(e) => {
+					if ((e.currentTarget as HTMLDetailsElement).open) {
+						const zone = (e.currentTarget as HTMLElement).querySelector(
+							'.photo-drop'
+						) as HTMLElement | null;
+						zone?.focus();
 					}
 				}}
 			>
-				<p class="extract-head">Upload or paste (⌘V) a photo and the AI will identify the place.</p>
-				<form
-					method="POST"
-					action="?/itin-extract-image"
-					enctype="multipart/form-data"
-					class="extract-form"
-					use:enhance={() => {
-						itinImageExtracting = true;
-						itinImageMsg = '';
-						return async ({ result }) => {
-							itinImageExtracting = false;
-							if (result.type === 'success' && result.data?.ok) {
-								const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
-								itinCandidates = withItinSelection(raw);
-								if (raw.length === 0) {
-									itinImageMsg = 'Could not identify a place in this photo.';
-								} else {
-									const dupes = raw.filter((c) => c.duplicate).length;
-									itinImageMsg = `${raw.length} place${raw.length === 1 ? '' : 's'} identified${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
-								}
-							} else if (result.type === 'failure') {
-								itinImageMsg =
-									(result.data as { error?: string })?.error ?? 'Extraction failed.';
-							} else {
-								itinImageMsg = 'Extraction failed.';
+				<summary>Import from photo</summary>
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<div
+					class="extract photo-drop"
+					tabindex="-1"
+					onpaste={(e) => {
+						const items = e.clipboardData?.items;
+						if (!items) return;
+						for (const item of items) {
+							if (item.type.startsWith('image/')) {
+								e.preventDefault();
+								const file = item.getAsFile();
+								if (!file) return;
+								itinImageFile = file;
+								itinImagePasted = true;
+								const dt = new DataTransfer();
+								dt.items.add(file);
+								const input = (e.currentTarget as HTMLElement).querySelector(
+									'input[type="file"]'
+								) as HTMLInputElement | null;
+								if (input) input.files = dt.files;
+								return;
 							}
-						};
+						}
 					}}
 				>
-					<input
-						type="file"
-						name="image"
-						accept="image/jpeg,image/png,image/webp,image/heic,.jpg,.jpeg,.png,.webp,.heic"
-						onchange={(e) => { itinImageFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null; itinImagePasted = false; }}
-					/>
-					<button class="btn small" type="submit" disabled={itinImageExtracting || !itinImageFile}>
-						{itinImageExtracting ? 'Identifying...' : 'Identify place'}
-					</button>
-				</form>
-				{#if itinImagePasted && itinImageFile}
-					<p class="extract-msg">Pasted image ready ({Math.round(itinImageFile.size / 1024)} KB)</p>
-				{/if}
-				{#if itinImageMsg}<p class="extract-msg">{itinImageMsg}</p>{/if}
-			</div>
-		</details>
-		{#if itinCandidates.length > 0}
-			<div class="candidates itinerary-candidates">
-				<div class="import-target">
-					<label>
-						Import under
-						<select bind:value={itinImportParentId}>
-							<option value="">Top level</option>
-							{#each itinImportParents as { node, depth } (node.id)}
-								<option value={String(node.id)}>
-									{'· '.repeat(depth)}{node.title} ({node.item_type})
-								</option>
-							{/each}
-						</select>
-					</label>
-					<label class="extract-opt">
-						<input type="checkbox" bind:checked={itinGeocode} />
-						Geocode places
-					</label>
-				</div>
-				<div class="cand-list">
-					{@render itineraryCandidateRows(itinCandidates, 0)}
-				</div>
-				<div class="cand-actions">
-					<button class="btn small" type="button" onclick={() => selectAllItin(true)}>
-						Select all
-					</button>
-					<button class="btn small" type="button" onclick={() => selectAllItin(false)}>
-						Select none
-					</button>
-					<button
-						class="btn small primary"
-						type="button"
-						onclick={importSelectedItinerary}
-						disabled={itinImporting || selectedItinCount() === 0}
-					>
-						{itinImporting
-							? 'Importing...'
-							: `Import ${selectedItinCount()} item${selectedItinCount() === 1 ? '' : 's'}`}
-					</button>
-					<button
-						class="btn small"
-						type="button"
-						onclick={() => {
-							itinCandidates = [];
-							itinExtractMsg = '';
-							itinUrlMsg = '';
+					<p class="extract-head">
+						Upload or paste (⌘V) a photo and the AI will identify the place.
+					</p>
+					<form
+						method="POST"
+						action="?/itin-extract-image"
+						enctype="multipart/form-data"
+						class="extract-form"
+						use:enhance={() => {
+							itinImageExtracting = true;
 							itinImageMsg = '';
-						}}>Clear</button
+							return async ({ result }) => {
+								itinImageExtracting = false;
+								if (result.type === 'success' && result.data?.ok) {
+									const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
+									itinCandidates = withItinSelection(raw);
+									if (raw.length === 0) {
+										itinImageMsg = 'Could not identify a place in this photo.';
+									} else {
+										const dupes = raw.filter((c) => c.duplicate).length;
+										itinImageMsg = `${raw.length} place${raw.length === 1 ? '' : 's'} identified${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+									}
+								} else if (result.type === 'failure') {
+									itinImageMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
+								} else {
+									itinImageMsg = 'Extraction failed.';
+								}
+							};
+						}}
 					>
+						<input
+							type="file"
+							name="image"
+							accept="image/jpeg,image/png,image/webp,image/heic,.jpg,.jpeg,.png,.webp,.heic"
+							onchange={(e) => {
+								itinImageFile = (e.currentTarget as HTMLInputElement).files?.[0] ?? null;
+								itinImagePasted = false;
+							}}
+						/>
+						<button
+							class="btn small"
+							type="submit"
+							disabled={itinImageExtracting || !itinImageFile}
+						>
+							{itinImageExtracting ? 'Identifying...' : 'Identify place'}
+						</button>
+					</form>
+					{#if itinImagePasted && itinImageFile}
+						<p class="extract-msg">
+							Pasted image ready ({Math.round(itinImageFile.size / 1024)} KB)
+						</p>
+					{/if}
+					{#if itinImageMsg}<p class="extract-msg">{itinImageMsg}</p>{/if}
 				</div>
-			</div>
+			</details>
+			{#if itinCandidates.length > 0}
+				<div class="candidates itinerary-candidates">
+					<div class="import-target">
+						<label>
+							Import under
+							<select bind:value={itinImportParentId}>
+								<option value="">Top level</option>
+								{#each itinImportParents as { node, depth } (node.id)}
+									<option value={String(node.id)}>
+										{'· '.repeat(depth)}{node.title} ({node.item_type})
+									</option>
+								{/each}
+							</select>
+						</label>
+						<label class="extract-opt">
+							<input type="checkbox" bind:checked={itinGeocode} />
+							Geocode places
+						</label>
+					</div>
+					<div class="cand-list">
+						{@render itineraryCandidateRows(itinCandidates, 0)}
+					</div>
+					<div class="cand-actions">
+						<button class="btn small" type="button" onclick={() => selectAllItin(true)}>
+							Select all
+						</button>
+						<button class="btn small" type="button" onclick={() => selectAllItin(false)}>
+							Select none
+						</button>
+						<button
+							class="btn small primary"
+							type="button"
+							onclick={importSelectedItinerary}
+							disabled={itinImporting || selectedItinCount() === 0}
+						>
+							{itinImporting
+								? 'Importing...'
+								: `Import ${selectedItinCount()} item${selectedItinCount() === 1 ? '' : 's'}`}
+						</button>
+						<button
+							class="btn small"
+							type="button"
+							onclick={() => {
+								itinCandidates = [];
+								itinExtractMsg = '';
+								itinUrlMsg = '';
+								itinImageMsg = '';
+							}}>Clear</button
+						>
+					</div>
+				</div>
+			{/if}
 		{/if}
-	{/if}
 	{/if}
 </div>
 
@@ -1562,221 +2180,246 @@
 		<a class="btn small packing-print-btn" href={packingPrintHref}>🖨 Print packing</a>
 	</div>
 	{#if !sectionsCollapsed.has('packing')}
-	{#each data.packing as { list, rows, total, checked } (list.id)}
-		{@const packHidden = hiddenIds(rows, packCollapsed)}
-		{@const packParents = parentIds(rows)}
-		{@const packStats = leafStats(rows)}
-		<section class="plist">
-			<div class="plist-head">
-				<strong>{list.name}</strong>
-				<span class="muted">{checked} / {total} packed</span>
-				{#if packParents.size > 0}
-					<button type="button" class="linkbtn" onclick={() => collapsePack(rows)}
-						>Collapse all</button
-					>
-					<span class="sep" aria-hidden="true">·</span>
-					<button type="button" class="linkbtn" onclick={() => expandPack(rows)}>Expand all</button>
-				{/if}
-				{#if !isViewer}
-					<button
-						class="del"
-						type="button"
-						title="delete list"
-						onclick={() =>
-							(pendingDelete = {
-								action: 'list-delete',
-								fields: { list_id: list.id },
-								heading: 'Delete this packing list?',
-								body: `"${list.name}" and all ${total} item${total === 1 ? '' : 's'} in it will be permanently removed.`,
-								confirmLabel: 'Delete list'
-							})}>✕ list</button
-					>
-				{/if}
-			</div>
-			{#if total > 0}
-				<div class="progress">
-					<span style="width: {Math.round((checked / total) * 100)}%"></span>
-				</div>
-			{/if}
-
-			<ul class="outline">
-				{#each rows as { node, depth } (node.id)}
-					{#if !packHidden.has(node.id)}
-						{#if !isViewer && isInserting(node.id, 'above')}{@render packInsertForm(
-								list.id,
-								node.id,
-								'above',
-								depth
-							)}{/if}
-						<li
-							style="padding-left: {depth * 22}px"
-							class:drop-before={dropTarget?.id === node.id && dropTarget?.pos === 'before'}
-							class:drop-after={dropTarget?.id === node.id && dropTarget?.pos === 'after'}
-							ondragover={(e) => onRowDragOver(e, list.id, node.id)}
-							ondrop={() => onRowDrop(list.id, rows)}
+		{#each data.packing as { list, rows, total, checked } (list.id)}
+			{@const packHidden = hiddenIds(rows, packCollapsed)}
+			{@const packParents = parentIds(rows)}
+			{@const packStats = leafStats(rows)}
+			<section class="plist">
+				<div class="plist-head">
+					<strong>{list.name}</strong>
+					<span class="muted">{checked} / {total} packed</span>
+					{#if packParents.size > 0}
+						<button type="button" class="linkbtn" onclick={() => collapsePack(rows)}
+							>Collapse all</button
 						>
-							<div class="line pack-line">
-								<div class="pack-main">
+						<span class="sep" aria-hidden="true">·</span>
+						<button type="button" class="linkbtn" onclick={() => expandPack(rows)}
+							>Expand all</button
+						>
+					{/if}
+					{#if !isViewer}
+						<button
+							class="del"
+							type="button"
+							title="delete list"
+							onclick={() =>
+								(pendingDelete = {
+									action: 'list-delete',
+									fields: { list_id: list.id },
+									heading: 'Delete this packing list?',
+									body: `"${list.name}" and all ${total} item${total === 1 ? '' : 's'} in it will be permanently removed.`,
+									confirmLabel: 'Delete list'
+								})}>✕ list</button
+						>
+					{/if}
+				</div>
+				{#if total > 0}
+					<div class="progress">
+						<span style="width: {Math.round((checked / total) * 100)}%"></span>
+					</div>
+				{/if}
+
+				<ul class="outline">
+					{#each rows as { node, depth } (node.id)}
+						{#if !packHidden.has(node.id)}
+							{#if !isViewer && isInserting(node.id, 'above')}{@render packInsertForm(
+									list.id,
+									node.id,
+									'above',
+									depth
+								)}{/if}
+							<li
+								style="padding-left: {depth * 22}px"
+								class:drop-before={dropTarget?.id === node.id && dropTarget?.pos === 'before'}
+								class:drop-after={dropTarget?.id === node.id && dropTarget?.pos === 'after'}
+								ondragover={(e) => onRowDragOver(e, list.id, node.id)}
+								ondrop={() => onRowDrop(list.id, rows)}
+							>
+								<div class="line pack-line">
+									<div class="pack-main">
+										{#if !isViewer}
+											<span
+												class="drag-handle"
+												title="drag to reorder"
+												draggable="true"
+												ondragstart={() => {
+													dragId = node.id;
+													dragListId = list.id;
+												}}
+												ondragend={() => {
+													dragId = null;
+													dragListId = null;
+													dropTarget = null;
+												}}
+												role="button"
+												tabindex="-1"
+												aria-label="drag to reorder">⠿</span
+											>
+										{/if}
+										{#if packParents.has(node.id)}
+											<button
+												class="caret"
+												type="button"
+												aria-expanded={!packCollapsed.has(node.id)}
+												aria-label={packCollapsed.has(node.id) ? 'Expand' : 'Collapse'}
+												onclick={() => togglePack(node.id)}
+												>{packCollapsed.has(node.id) ? '▸' : '▾'}</button
+											>
+										{:else}
+											<span class="caret-spacer" aria-hidden="true"></span>
+										{/if}
+										<input
+											type="checkbox"
+											class="chk"
+											checked={packChecked(packStats.get(node.id))}
+											indeterminate={packIndeterminate(packStats.get(node.id))}
+											onchange={(e) => toggleCheck(node.id, e.currentTarget.checked)}
+										/>
+										<span class="grow" class:done={packChecked(packStats.get(node.id))}>
+											{node.name}{#if node.quantity > 1}<span class="muted">
+													×{node.quantity}</span
+												>{/if}
+											{#if node.notes}<div class="meta note">{node.notes}</div>{/if}
+										</span>
+									</div>
 									{#if !isViewer}
-										<span
-											class="drag-handle"
-											title="drag to reorder"
-											draggable="true"
-											ondragstart={() => {
-												dragId = node.id;
-												dragListId = list.id;
-											}}
-											ondragend={() => {
-												dragId = null;
-												dragListId = null;
-												dropTarget = null;
-											}}
-											role="button"
-											tabindex="-1"
-											aria-label="drag to reorder">⠿</span
-										>
+										<div class="pack-controls">
+											<span class="insert-controls">
+												<button
+													type="button"
+													title="insert above"
+													onclick={() => openInsert(node.id, 'above')}>＋↑</button
+												>
+												<button
+													type="button"
+													title="insert below"
+													onclick={() => openInsert(node.id, 'below')}>＋↓</button
+												>
+											</span>
+											{@render treeControls(
+												node.id,
+												'pack-move',
+												'pack-delete',
+												list.id,
+												node.name,
+												rows.some((r) => r.node.parent_id === node.id)
+											)}
+										</div>
 									{/if}
-									{#if packParents.has(node.id)}
-										<button
-											class="caret"
-											type="button"
-											aria-expanded={!packCollapsed.has(node.id)}
-											aria-label={packCollapsed.has(node.id) ? 'Expand' : 'Collapse'}
-											onclick={() => togglePack(node.id)}>{packCollapsed.has(node.id) ? '▸' : '▾'}</button
-										>
-									{:else}
-										<span class="caret-spacer" aria-hidden="true"></span>
-									{/if}
-									<input
-										type="checkbox"
-										class="chk"
-										checked={packChecked(packStats.get(node.id))}
-										indeterminate={packIndeterminate(packStats.get(node.id))}
-										onchange={(e) => toggleCheck(node.id, e.currentTarget.checked)}
-									/>
-									<span class="grow" class:done={packChecked(packStats.get(node.id))}>
-										{node.name}{#if node.quantity > 1}<span class="muted"> ×{node.quantity}</span>{/if}
-										{#if node.notes}<div class="meta note">{node.notes}</div>{/if}
-									</span>
 								</div>
 								{#if !isViewer}
-									<div class="pack-controls">
-										<span class="insert-controls">
-											<button type="button" title="insert above" onclick={() => openInsert(node.id, 'above')}
-												>＋↑</button
+									<details class="edit" style="padding-left: {depth * 22 + 26}px">
+										<summary>edit</summary>
+										<form
+											method="POST"
+											action="?/pack-edit"
+											use:enhance={() => {
+												return async ({ update }) => {
+													await update({ reset: false });
+												};
+											}}
+											class="edit-form"
+										>
+											<input type="hidden" name="id" value={node.id} />
+											<input type="hidden" name="list_id" value={list.id} />
+											<input type="hidden" name="category" value={node.category ?? ''} />
+											<input name="name" value={node.name} placeholder="Name" required />
+											<input
+												name="quantity"
+												type="number"
+												min="1"
+												value={node.quantity}
+												class="qty"
+												aria-label="quantity"
+											/>
+											<textarea name="notes" rows="2" placeholder="Notes"
+												>{node.notes ?? ''}</textarea
 											>
-											<button type="button" title="insert below" onclick={() => openInsert(node.id, 'below')}
-												>＋↓</button
-											>
-										</span>
-										{@render treeControls(
-											node.id,
-											'pack-move',
-											'pack-delete',
-											list.id,
-											node.name,
-											rows.some((r) => r.node.parent_id === node.id)
-										)}
-									</div>
+											<button class="btn small primary" type="submit">Save</button>
+										</form>
+									</details>
 								{/if}
-							</div>
-						{#if !isViewer}
-							<details class="edit" style="padding-left: {depth * 22 + 26}px">
-								<summary>edit</summary>
-								<form method="POST" action="?/pack-edit" use:enhance={() => {
-									return async ({ update }) => { await update({ reset: false }); };
-								}} class="edit-form">
-									<input type="hidden" name="id" value={node.id} />
-									<input type="hidden" name="list_id" value={list.id} />
-									<input type="hidden" name="category" value={node.category ?? ''} />
-									<input name="name" value={node.name} placeholder="Name" required />
-									<input name="quantity" type="number" min="1" value={node.quantity} class="qty" aria-label="quantity" />
-									<textarea name="notes" rows="2" placeholder="Notes">{node.notes ?? ''}</textarea>
-									<button class="btn small primary" type="submit">Save</button>
-								</form>
-							</details>
+							</li>
+							{#if !isViewer && isInserting(node.id, 'below')}{@render packInsertForm(
+									list.id,
+									node.id,
+									'below',
+									depth
+								)}{/if}
 						{/if}
-					</li>
-					{#if !isViewer && isInserting(node.id, 'below')}{@render packInsertForm(
-							list.id,
-							node.id,
-							'below',
-							depth
-						)}{/if}
-					{/if}
-				{/each}
-			</ul>
+					{/each}
+				</ul>
 
-			{#if !isViewer}
-				<form method="POST" action="?/pack-add" use:enhance class="add-row">
-					<input type="hidden" name="list_id" value={list.id} />
-					<input name="name" placeholder="Add item…" required />
-					<input
-						name="quantity"
-						type="number"
-						min="1"
-						value="1"
-						class="qty"
-						aria-label="quantity"
-					/>
-					<button class="btn small primary" type="submit">Add</button>
-				</form>
-				<details class="paste">
-					<summary>Paste many · save as template</summary>
-					<form method="POST" action="?/pack-paste" use:enhance>
+				{#if !isViewer}
+					<form method="POST" action="?/pack-add" use:enhance class="add-row">
 						<input type="hidden" name="list_id" value={list.id} />
-						<textarea name="text" rows="3" placeholder="Socks&#10;Charger&#10;…"></textarea>
-						<button class="btn small" type="submit">Add all</button>
+						<input name="name" placeholder="Add item…" required />
+						<input
+							name="quantity"
+							type="number"
+							min="1"
+							value="1"
+							class="qty"
+							aria-label="quantity"
+						/>
+						<button class="btn small primary" type="submit">Add</button>
 					</form>
-					<form method="POST" action="?/tmpl-save" use:enhance class="add-row">
-						<input type="hidden" name="list_id" value={list.id} />
-						<input name="name" placeholder="Template name" required />
-						<button class="btn small" type="submit">Save as template</button>
-					</form>
-				</details>
-			{/if}
-		</section>
-	{/each}
-
-	{#if !isViewer}
-		<form method="POST" action="?/list-add" use:enhance class="add-row">
-			<input name="name" placeholder="New packing list name" />
-			<button class="btn small primary" type="submit">Add list</button>
-		</form>
-
-		<div class="templates">
-			{#if data.templates.length === 0}
-				<form method="POST" action="?/tmpl-seed" use:enhance class="inline">
-					<button class="btn small" type="submit">Add starter "Essentials" template</button>
-				</form>
-			{:else}
-				<span class="muted">Apply a template:</span>
-				{#each data.templates as t (t.id)}
-					<span class="tmpl-chip">
-						<form method="POST" action="?/tmpl-apply" use:enhance class="inline">
-							<input type="hidden" name="template_id" value={t.id} />
-							<button class="btn small" type="submit">{t.name} ({t.item_count})</button>
+					<details class="paste">
+						<summary>Paste many · save as template</summary>
+						<form method="POST" action="?/pack-paste" use:enhance>
+							<input type="hidden" name="list_id" value={list.id} />
+							<textarea name="text" rows="3" placeholder="Socks&#10;Charger&#10;…"></textarea>
+							<button class="btn small" type="submit">Add all</button>
 						</form>
-						{#if !isViewer}
-							<button
-								type="button"
-								class="del"
-								title="delete template"
-								onclick={() =>
-									(pendingDelete = {
-										action: 'tmpl-delete',
-										fields: { template_id: t.id },
-										heading: 'Delete this template?',
-										body: `"${t.name}" will be permanently removed. Packing lists already created from it are not affected.`,
-										confirmLabel: 'Delete'
-									})}>✕</button
-							>
-						{/if}
-					</span>
-				{/each}
-			{/if}
-		</div>
-	{/if}
+						<form method="POST" action="?/tmpl-save" use:enhance class="add-row">
+							<input type="hidden" name="list_id" value={list.id} />
+							<input name="name" placeholder="Template name" required />
+							<button class="btn small" type="submit">Save as template</button>
+						</form>
+					</details>
+				{/if}
+			</section>
+		{/each}
+
+		{#if !isViewer}
+			<form method="POST" action="?/list-add" use:enhance class="add-row">
+				<input name="name" placeholder="New packing list name" />
+				<button class="btn small primary" type="submit">Add list</button>
+			</form>
+
+			<div class="templates">
+				{#if data.templates.length === 0}
+					<form method="POST" action="?/tmpl-seed" use:enhance class="inline">
+						<button class="btn small" type="submit">Add starter "Essentials" template</button>
+					</form>
+				{:else}
+					<span class="muted">Apply a template:</span>
+					{#each data.templates as t (t.id)}
+						<span class="tmpl-chip">
+							<form method="POST" action="?/tmpl-apply" use:enhance class="inline">
+								<input type="hidden" name="template_id" value={t.id} />
+								<button class="btn small" type="submit">{t.name} ({t.item_count})</button>
+							</form>
+							{#if !isViewer}
+								<button
+									type="button"
+									class="del"
+									title="delete template"
+									onclick={() =>
+										(pendingDelete = {
+											action: 'tmpl-delete',
+											fields: { template_id: t.id },
+											heading: 'Delete this template?',
+											body: `"${t.name}" will be permanently removed. Packing lists already created from it are not affected.`,
+											confirmLabel: 'Delete'
+										})}>✕</button
+								>
+							{/if}
+						</span>
+					{/each}
+				{/if}
+			</div>
+		{/if}
 	{/if}
 </div>
 
@@ -1787,133 +2430,100 @@
 		<h2>Reservations</h2>
 	</button>
 	{#if !sectionsCollapsed.has('reservations')}
-	{#if data.reservations.length === 0}
-		<p class="muted">No reservations yet.</p>
-	{:else}
-		<ul class="outline">
-			{#each data.reservations as r (r.id)}
-				<li>
-					<div class="res-row">
-						<div class="res-header">
-							<span class="badge need">{r.reservation_type}</span>
-							{#if !isViewer}
-								<span class="res-controls">
-									{#each ['up', 'down'] as dir}
-										<form method="POST" action="?/res-move" use:enhance>
-											<input type="hidden" name="id" value={r.id} />
-											<input type="hidden" name="direction" value={dir} />
-											<button type="submit" title="move {dir}">{dir === 'up' ? '↑' : '↓'}</button>
-										</form>
-									{/each}
-									<button
-										type="button"
-										class="del"
-										title="delete"
-										onclick={() =>
-											(pendingDelete = {
-												action: 'res-delete',
-												fields: { id: r.id },
-												heading: 'Delete this reservation?',
-												body: `"${r.title}" will be permanently removed.`,
-												confirmLabel: 'Delete'
-											})}>✕</button
+		{#if data.reservations.length === 0}
+			<p class="muted">No reservations yet.</p>
+		{:else}
+			<ul class="outline">
+				{#each data.reservations as r (r.id)}
+					<li>
+						<div class="res-row">
+							<div class="res-header">
+								<span class="badge need">{r.reservation_type}</span>
+								{#if !isViewer}
+									<span class="res-controls">
+										{#each ['up', 'down'] as dir}
+											<form method="POST" action="?/res-move" use:enhance>
+												<input type="hidden" name="id" value={r.id} />
+												<input type="hidden" name="direction" value={dir} />
+												<button type="submit" title="move {dir}">{dir === 'up' ? '↑' : '↓'}</button>
+											</form>
+										{/each}
+										<button
+											type="button"
+											class="del"
+											title="delete"
+											onclick={() =>
+												(pendingDelete = {
+													action: 'res-delete',
+													fields: { id: r.id },
+													heading: 'Delete this reservation?',
+													body: `"${r.title}" will be permanently removed.`,
+													confirmLabel: 'Delete'
+												})}>✕</button
+										>
+									</span>
+								{/if}
+							</div>
+							<span class="ttl">{r.title}</span>
+							<div class="meta">
+								{#if r.confirmation_code}Conf: {r.confirmation_code} ·
+								{/if}
+								{#if r.status}{r.status} ·
+								{/if}
+								{#if r.start_at}{fmtDateTime(r.start_at)}{/if}
+								{#if r.end_at}
+									→ {fmtDateTime(r.end_at)}{/if}
+							</div>
+							{#if r.notes}
+								<details class="res-notes">
+									<summary>Show details</summary>
+									<pre class="res-notes-body">{r.notes}</pre>
+								</details>
+							{/if}
+						</div>
+						{#if !isViewer}
+							<details class="edit">
+								<summary>edit</summary>
+								<form method="POST" action="?/res-edit" use:enhance class="edit-form">
+									<input type="hidden" name="id" value={r.id} />
+									<select name="reservation_type" aria-label="type">
+										{#each ['accommodation', 'flight', 'restaurant', 'transport', 'other'] as t (t)}
+											<option value={t} selected={r.reservation_type === t}>{t}</option>
+										{/each}
+									</select>
+									<input name="title" value={r.title} placeholder="Title" />
+									<input
+										name="confirmation_code"
+										value={r.confirmation_code ?? ''}
+										placeholder="Confirmation code"
+									/>
+									<input name="status" value={r.status ?? ''} placeholder="Status" />
+									<label class="dt"
+										>Start <input
+											type="datetime-local"
+											name="start_at"
+											value={r.start_at ?? ''}
+										/></label
 									>
-								</span>
-							{/if}
-						</div>
-						<span class="ttl">{r.title}</span>
-						<div class="meta">
-							{#if r.confirmation_code}Conf: {r.confirmation_code} ·
-							{/if}
-							{#if r.status}{r.status} ·
-							{/if}
-							{#if r.start_at}{fmtDateTime(r.start_at)}{/if}
-							{#if r.end_at}
-								→ {fmtDateTime(r.end_at)}{/if}
-						</div>
-						{#if r.notes}
-							<details class="res-notes">
-								<summary>Show details</summary>
-								<pre class="res-notes-body">{r.notes}</pre>
+									<label class="dt"
+										>End <input type="datetime-local" name="end_at" value={r.end_at ?? ''} /></label
+									>
+									<textarea name="notes" rows="2" placeholder="Notes">{r.notes ?? ''}</textarea>
+									<button class="btn small primary" type="submit">Save</button>
+								</form>
 							</details>
 						{/if}
-					</div>
-					{#if !isViewer}
-						<details class="edit">
-							<summary>edit</summary>
-							<form method="POST" action="?/res-edit" use:enhance class="edit-form">
-								<input type="hidden" name="id" value={r.id} />
-								<select name="reservation_type" aria-label="type">
-									{#each ['accommodation', 'flight', 'restaurant', 'transport', 'other'] as t (t)}
-										<option value={t} selected={r.reservation_type === t}>{t}</option>
-									{/each}
-								</select>
-								<input name="title" value={r.title} placeholder="Title" />
-								<input
-									name="confirmation_code"
-									value={r.confirmation_code ?? ''}
-									placeholder="Confirmation code"
-								/>
-								<input name="status" value={r.status ?? ''} placeholder="Status" />
-								<label class="dt"
-									>Start <input
-										type="datetime-local"
-										name="start_at"
-										value={r.start_at ?? ''}
-									/></label
-								>
-								<label class="dt"
-									>End <input type="datetime-local" name="end_at" value={r.end_at ?? ''} /></label
-								>
-								<textarea name="notes" rows="2" placeholder="Notes">{r.notes ?? ''}</textarea>
-								<button class="btn small primary" type="submit">Save</button>
-							</form>
-						</details>
-					{/if}
-				</li>
-			{/each}
-		</ul>
-	{/if}
+					</li>
+				{/each}
+			</ul>
+		{/if}
 
-	{#if !isViewer}
-		<details class="paste">
-			<summary>Add reservation</summary>
+		{#if !isViewer}
+			<details class="paste">
+				<summary>Add reservation</summary>
 
-			<div class="extract">
-				<p class="extract-head">Auto-fill from a confirmation (then review below)</p>
-				<form
-					method="POST"
-					action="?/res-extract"
-					class="extract-form"
-					use:enhance={() => {
-						extracting = true;
-						extractMsg = '';
-						return async ({ result }) => {
-							extracting = false;
-							if (result.type === 'success' && result.data?.ok) {
-								applyExtract((result.data as { fields?: Record<string, unknown> }).fields ?? {});
-								extractMsg = 'Filled from the email — review and edit, then Add reservation.';
-							} else if (result.type === 'failure') {
-								extractMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
-							} else {
-								extractMsg = 'Extraction failed.';
-							}
-						};
-					}}
-				>
-					<input type="hidden" name="source" value="text" />
-					<textarea
-						name="text"
-						rows="3"
-						bind:value={extractText}
-						placeholder="Paste a confirmation email here…"
-					></textarea>
-					<button class="btn small" type="submit" disabled={extracting || !extractText.trim()}>
-						{extracting ? 'Extracting…' : 'Extract from text'}
-					</button>
-				</form>
-
-				{#if extractableDocs.length > 0}
+				<div class="extract">
+					<p class="extract-head">Auto-fill from a confirmation (then review below)</p>
 					<form
 						method="POST"
 						action="?/res-extract"
@@ -1925,7 +2535,7 @@
 								extracting = false;
 								if (result.type === 'success' && result.data?.ok) {
 									applyExtract((result.data as { fields?: Record<string, unknown> }).fields ?? {});
-									extractMsg = 'Filled from the document — review and edit, then Add reservation.';
+									extractMsg = 'Filled from the email — review and edit, then Add reservation.';
 								} else if (result.type === 'failure') {
 									extractMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
 								} else {
@@ -1934,65 +2544,106 @@
 							};
 						}}
 					>
-						<input type="hidden" name="source" value="document" />
-						<select name="attachment_id" bind:value={extractDocId} aria-label="document">
-							<option value="" disabled>Choose a document…</option>
-							{#each extractableDocs as a (a.id)}
-								<option value={a.id}>{a.original_name}</option>
-							{/each}
-						</select>
-						<button class="btn small" type="submit" disabled={extracting || !extractDocId}>
-							{extracting ? 'Extracting…' : 'Extract from document'}
+						<input type="hidden" name="source" value="text" />
+						<textarea
+							name="text"
+							rows="3"
+							bind:value={extractText}
+							placeholder="Paste a confirmation email here…"
+						></textarea>
+						<button class="btn small" type="submit" disabled={extracting || !extractText.trim()}>
+							{extracting ? 'Extracting…' : 'Extract from text'}
 						</button>
 					</form>
-				{/if}
-				{#if extractMsg}<p class="extract-msg">{extractMsg}</p>{/if}
-			</div>
 
-			<form
-				method="POST"
-				action="?/res-add"
-				class="edit-form"
-				use:enhance={() => {
-					return async ({ result, update }) => {
-						if (result.type === 'success') {
-							resDraft = emptyResDraft();
-							extractText = '';
-							extractDocId = '';
-							extractMsg = '';
-						}
-						await update();
-					};
-				}}
-			>
-				<select name="reservation_type" aria-label="type" bind:value={resDraft.reservation_type}>
-					{#each ['accommodation', 'flight', 'restaurant', 'transport', 'other'] as t (t)}
-						<option value={t}>{t}</option>
-					{/each}
-				</select>
-				<input
-					name="title"
-					placeholder="Title (e.g. Hôtel d'Europe)"
-					required
-					bind:value={resDraft.title}
-				/>
-				<input
-					name="confirmation_code"
-					placeholder="Confirmation code"
-					bind:value={resDraft.confirmation_code}
-				/>
-				<input name="status" placeholder="Status" bind:value={resDraft.status} />
-				<label class="dt"
-					>Start <input type="datetime-local" name="start_at" bind:value={resDraft.start_at} /></label
+					{#if extractableDocs.length > 0}
+						<form
+							method="POST"
+							action="?/res-extract"
+							class="extract-form"
+							use:enhance={() => {
+								extracting = true;
+								extractMsg = '';
+								return async ({ result }) => {
+									extracting = false;
+									if (result.type === 'success' && result.data?.ok) {
+										applyExtract(
+											(result.data as { fields?: Record<string, unknown> }).fields ?? {}
+										);
+										extractMsg =
+											'Filled from the document — review and edit, then Add reservation.';
+									} else if (result.type === 'failure') {
+										extractMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
+									} else {
+										extractMsg = 'Extraction failed.';
+									}
+								};
+							}}
+						>
+							<input type="hidden" name="source" value="document" />
+							<select name="attachment_id" bind:value={extractDocId} aria-label="document">
+								<option value="" disabled>Choose a document…</option>
+								{#each extractableDocs as a (a.id)}
+									<option value={a.id}>{a.original_name}</option>
+								{/each}
+							</select>
+							<button class="btn small" type="submit" disabled={extracting || !extractDocId}>
+								{extracting ? 'Extracting…' : 'Extract from document'}
+							</button>
+						</form>
+					{/if}
+					{#if extractMsg}<p class="extract-msg">{extractMsg}</p>{/if}
+				</div>
+
+				<form
+					method="POST"
+					action="?/res-add"
+					class="edit-form"
+					use:enhance={() => {
+						return async ({ result, update }) => {
+							if (result.type === 'success') {
+								resDraft = emptyResDraft();
+								extractText = '';
+								extractDocId = '';
+								extractMsg = '';
+							}
+							await update();
+						};
+					}}
 				>
-				<label class="dt"
-					>End <input type="datetime-local" name="end_at" bind:value={resDraft.end_at} /></label
-				>
-				<textarea name="notes" rows="2" placeholder="Notes" bind:value={resDraft.notes}></textarea>
-				<button class="btn small primary" type="submit">Add reservation</button>
-			</form>
-		</details>
-	{/if}
+					<select name="reservation_type" aria-label="type" bind:value={resDraft.reservation_type}>
+						{#each ['accommodation', 'flight', 'restaurant', 'transport', 'other'] as t (t)}
+							<option value={t}>{t}</option>
+						{/each}
+					</select>
+					<input
+						name="title"
+						placeholder="Title (e.g. Hôtel d'Europe)"
+						required
+						bind:value={resDraft.title}
+					/>
+					<input
+						name="confirmation_code"
+						placeholder="Confirmation code"
+						bind:value={resDraft.confirmation_code}
+					/>
+					<input name="status" placeholder="Status" bind:value={resDraft.status} />
+					<label class="dt"
+						>Start <input
+							type="datetime-local"
+							name="start_at"
+							bind:value={resDraft.start_at}
+						/></label
+					>
+					<label class="dt"
+						>End <input type="datetime-local" name="end_at" bind:value={resDraft.end_at} /></label
+					>
+					<textarea name="notes" rows="2" placeholder="Notes" bind:value={resDraft.notes}
+					></textarea>
+					<button class="btn small primary" type="submit">Add reservation</button>
+				</form>
+			</details>
+		{/if}
 	{/if}
 </div>
 
@@ -2003,96 +2654,106 @@
 		<h2>Documents</h2>
 	</button>
 	{#if !sectionsCollapsed.has('documents')}
-	{#if data.attachments.length === 0}
-		<p class="muted">No documents yet.</p>
-	{:else}
-		<ul class="outline">
-			{#each data.attachments as a (a.id)}
-				<li>
-					<div class="line">
-						<span class="grow">
-							{#if a.kind === 'text'}
-								<details class="textdoc">
-									<summary class="ttl">{a.display_name || a.original_name}</summary>
-									<pre class="textdoc-body">{a.text_content}</pre>
-								</details>
-								<div class="meta">text · {fmtSize(a.size_bytes)}</div>
-							{:else}
-								<span class="ttl">{a.display_name || a.original_name}</span>
-								<div class="meta doc-links">
-									{a.mime_type} · {fmtSize(a.size_bytes)}
-									<a
-										class="chip-link"
-										href="/trips/{data.trip.id}/attachments/{a.id}/view">View</a
-									>
-									<AttachmentDownloadButton
-										class="chip-link"
-										url={`/trips/${data.trip.id}/attachments/${a.id}`}
-										filename={a.original_name}
-										mimeType={a.mime_type}
-									/>
-								</div>
+		{#if data.attachments.length === 0}
+			<p class="muted">No documents yet.</p>
+		{:else}
+			<ul class="outline">
+				{#each data.attachments as a (a.id)}
+					<li>
+						<div class="line">
+							<span class="grow">
+								{#if a.kind === 'text'}
+									<details class="textdoc">
+										<summary class="ttl">{a.display_name || a.original_name}</summary>
+										<pre class="textdoc-body">{a.text_content}</pre>
+									</details>
+									<div class="meta">text · {fmtSize(a.size_bytes)}</div>
+								{:else}
+									<span class="ttl">{a.display_name || a.original_name}</span>
+									<div class="meta doc-links">
+										{a.mime_type} · {fmtSize(a.size_bytes)}
+										<a class="chip-link" href="/trips/{data.trip.id}/attachments/{a.id}/view"
+											>View</a
+										>
+										<AttachmentDownloadButton
+											class="chip-link"
+											url={`/trips/${data.trip.id}/attachments/${a.id}`}
+											filename={a.original_name}
+											mimeType={a.mime_type}
+										/>
+									</div>
+								{/if}
+							</span>
+							{#if !isViewer}
+								<button
+									type="button"
+									class="del"
+									title="delete"
+									onclick={() =>
+										(pendingDelete = {
+											action: 'attach-delete',
+											fields: { id: a.id },
+											heading: 'Delete this document?',
+											body: `"${a.display_name || a.original_name}" will be permanently removed from storage.`,
+											confirmLabel: 'Delete'
+										})}>✕</button
+								>
 							{/if}
-						</span>
+						</div>
 						{#if !isViewer}
-							<button
-								type="button"
-								class="del"
-								title="delete"
-								onclick={() =>
-									(pendingDelete = {
-										action: 'attach-delete',
-										fields: { id: a.id },
-										heading: 'Delete this document?',
-										body: `"${a.display_name || a.original_name}" will be permanently removed from storage.`,
-										confirmLabel: 'Delete'
-									})}>✕</button
-							>
+							<details class="edit">
+								<summary>edit</summary>
+								<form
+									method="POST"
+									action="?/attach-rename"
+									use:enhance={() => {
+										return async ({ update }) => {
+											await update({ reset: false });
+										};
+									}}
+									class="edit-form"
+								>
+									<input type="hidden" name="id" value={a.id} />
+									<input
+										name="display_name"
+										value={a.display_name ?? ''}
+										placeholder="Display name (optional)"
+									/>
+									<button class="btn small primary" type="submit">Save</button>
+								</form>
+							</details>
 						{/if}
-					</div>
-					{#if !isViewer}
-						<details class="edit">
-							<summary>edit</summary>
-							<form method="POST" action="?/attach-rename" use:enhance={() => {
-								return async ({ update }) => { await update({ reset: false }); };
-							}} class="edit-form">
-								<input type="hidden" name="id" value={a.id} />
-								<input name="display_name" value={a.display_name ?? ''} placeholder="Display name (optional)" />
-								<button class="btn small primary" type="submit">Save</button>
-							</form>
-						</details>
-					{/if}
-				</li>
-			{/each}
-		</ul>
-	{/if}
+					</li>
+				{/each}
+			</ul>
+		{/if}
 
-	{#if !isViewer}
-		<form
-			method="POST"
-			action="?/attach-upload"
-			use:enhance
-			enctype="multipart/form-data"
-			class="add-row upload-row"
-		>
-			<input name="display_name" placeholder="Label (optional)" />
-			<input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif" required />
-			<button class="btn small primary" type="submit">Upload</button>
-		</form>
-		<p class="muted" style="font-size: 0.78rem">PDF or image, up to 30 MB. Stored privately.</p>
-		<details class="paste">
-			<summary>Paste text instead</summary>
-			<form method="POST" action="?/doc-text-add" use:enhance class="add-row textdoc-form">
-				<input name="title" placeholder="Title (e.g. Hotel confirmation email)" />
-				<textarea name="text" rows="4" placeholder="Paste an email body or any note…" required
-				></textarea>
-				<button class="btn small primary" type="submit">Save text</button>
+		{#if !isViewer}
+			<form
+				method="POST"
+				action="?/attach-upload"
+				use:enhance
+				enctype="multipart/form-data"
+				class="add-row upload-row"
+			>
+				<input name="display_name" placeholder="Label (optional)" />
+				<input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,.heif" required />
+				<button class="btn small primary" type="submit">Upload</button>
 			</form>
-			<p class="muted" style="font-size: 0.78rem">
-				Saved as a searchable note — no file needed. Good for confirmation emails on a phone.
-			</p>
-		</details>
-	{/if}
+			<p class="muted" style="font-size: 0.78rem">PDF or image, up to 30 MB. Stored privately.</p>
+			<details class="paste">
+				<summary>Paste text instead</summary>
+				<form method="POST" action="?/doc-text-add" use:enhance class="add-row textdoc-form">
+					<input name="title" placeholder="Title (e.g. Hotel confirmation email)" />
+					<textarea name="text" rows="4" placeholder="Paste an email body or any note…" required
+					></textarea>
+					<button class="btn small primary" type="submit">Save text</button>
+				</form>
+				<p class="muted" style="font-size: 0.78rem">
+					Saved as a searchable note — no file needed. Good for confirmation emails on a phone.
+				</p>
+			</details>
+		{/if}
 	{/if}
 </div>
 
@@ -2104,155 +2765,134 @@
 		<span class="expense-total">{fmtAmount(expenseTotal)}</span>
 	</button>
 	{#if !sectionsCollapsed.has('expenses')}
-	{#if data.expenses.length === 0}
-		<p class="muted">No expenses yet.</p>
-	{:else}
-		<ul class="outline">
-			{#each data.expenses as e (e.id)}
-				<li>
-					<div class="exp-row">
-						<div class="exp-main">
-							<span class="badge need">{e.category}</span>
-							<div class="exp-desc">{e.description}</div>
-							<div class="meta">
-								{#if e.expense_date}{new Date(e.expense_date + 'T00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}{/if}
-								{#if e.notes} · {e.notes}{/if}
-							</div>
-							{#if e.attachment_id}
-								{@const att = data.attachments.find(a => a.id === e.attachment_id)}
-								{#if att}
-									<a class="exp-doc-link" href="/trips/{data.trip.id}/attachments/{att.id}/view">
-										{att.display_name || att.original_name}
-									</a>
+		{#if data.expenses.length === 0}
+			<p class="muted">No expenses yet.</p>
+		{:else}
+			<ul class="outline">
+				{#each data.expenses as e (e.id)}
+					<li>
+						<div class="exp-row">
+							<div class="exp-main">
+								<span class="badge need">{e.category}</span>
+								<div class="exp-desc">{e.description}</div>
+								<div class="meta">
+									{#if e.expense_date}{new Date(e.expense_date + 'T00:00').toLocaleDateString(
+											'en-US',
+											{ month: 'short', day: 'numeric' }
+										)}{/if}
+									{#if e.notes}
+										· {e.notes}{/if}
+								</div>
+								{#if e.attachment_id}
+									{@const att = data.attachments.find((a) => a.id === e.attachment_id)}
+									{#if att}
+										<a class="exp-doc-link" href="/trips/{data.trip.id}/attachments/{att.id}/view">
+											{att.display_name || att.original_name}
+										</a>
+									{/if}
 								{/if}
+							</div>
+							<span class="exp-amount">{fmtAmount(e.amount_cents)}</span>
+							{#if !isViewer}
+								<span class="exp-controls">
+									{#each ['up', 'down'] as dir}
+										<form method="POST" action="?/exp-move" use:enhance>
+											<input type="hidden" name="id" value={e.id} />
+											<input type="hidden" name="direction" value={dir} />
+											<button type="submit" title="move {dir}">{dir === 'up' ? '↑' : '↓'}</button>
+										</form>
+									{/each}
+									<button
+										type="button"
+										class="del"
+										title="delete"
+										onclick={() =>
+											(pendingDelete = {
+												action: 'exp-delete',
+												fields: { id: e.id },
+												heading: 'Delete this expense?',
+												body: `"${e.description}" will be permanently removed.`,
+												confirmLabel: 'Delete'
+											})}>✕</button
+									>
+								</span>
 							{/if}
 						</div>
-						<span class="exp-amount">{fmtAmount(e.amount_cents)}</span>
 						{#if !isViewer}
-							<span class="exp-controls">
-								{#each ['up', 'down'] as dir}
-									<form method="POST" action="?/exp-move" use:enhance>
-										<input type="hidden" name="id" value={e.id} />
-										<input type="hidden" name="direction" value={dir} />
-										<button type="submit" title="move {dir}">{dir === 'up' ? '↑' : '↓'}</button>
-									</form>
-								{/each}
-								<button
-									type="button"
-									class="del"
-									title="delete"
-									onclick={() =>
-										(pendingDelete = {
-											action: 'exp-delete',
-											fields: { id: e.id },
-											heading: 'Delete this expense?',
-											body: `"${e.description}" will be permanently removed.`,
-											confirmLabel: 'Delete'
-										})}>✕</button
-								>
-							</span>
+							<details class="edit">
+								<summary>edit</summary>
+								<form method="POST" action="?/exp-edit" use:enhance class="edit-form">
+									<input type="hidden" name="id" value={e.id} />
+									<div class="form-row">
+										<input type="date" name="expense_date" value={e.expense_date ?? ''} />
+										<select name="category" aria-label="category">
+											{#each ['lodging', 'food', 'transport', 'activities', 'other'] as c (c)}
+												<option value={c} selected={e.category === c}>{c}</option>
+											{/each}
+										</select>
+									</div>
+									<input
+										name="description"
+										value={e.description}
+										placeholder="Description"
+										required
+									/>
+									<div class="form-row">
+										<input
+											name="amount"
+											value={(e.amount_cents / 100).toFixed(2)}
+											placeholder="$0.00"
+											inputmode="decimal"
+										/>
+										<select name="attachment_id" aria-label="linked document">
+											<option value="">Link document (optional)</option>
+											{#each data.attachments as a (a.id)}
+												<option value={a.id} selected={e.attachment_id === a.id}
+													>{a.display_name || a.original_name}</option
+												>
+											{/each}
+										</select>
+									</div>
+									<textarea name="notes" rows="1" placeholder="Notes (optional)"
+										>{e.notes ?? ''}</textarea
+									>
+									<button class="btn small primary" type="submit">Save</button>
+								</form>
+							</details>
 						{/if}
-					</div>
-					{#if !isViewer}
-						<details class="edit">
-							<summary>edit</summary>
-							<form method="POST" action="?/exp-edit" use:enhance class="edit-form">
-								<input type="hidden" name="id" value={e.id} />
-								<div class="form-row">
-									<input type="date" name="expense_date" value={e.expense_date ?? ''} />
-									<select name="category" aria-label="category">
-										{#each ['lodging', 'food', 'transport', 'activities', 'other'] as c (c)}
-											<option value={c} selected={e.category === c}>{c}</option>
-										{/each}
-									</select>
-								</div>
-								<input name="description" value={e.description} placeholder="Description" required />
-								<div class="form-row">
-									<input name="amount" value={(e.amount_cents / 100).toFixed(2)} placeholder="$0.00" inputmode="decimal" />
-									<select name="attachment_id" aria-label="linked document">
-										<option value="">Link document (optional)</option>
-										{#each data.attachments as a (a.id)}
-											<option value={a.id} selected={e.attachment_id === a.id}>{a.display_name || a.original_name}</option>
-										{/each}
-									</select>
-								</div>
-								<textarea name="notes" rows="1" placeholder="Notes (optional)">{e.notes ?? ''}</textarea>
-								<button class="btn small primary" type="submit">Save</button>
-							</form>
-						</details>
-					{/if}
-				</li>
-			{/each}
-		</ul>
-
-		{@const catTotals = data.expenses.reduce((acc: Record<string, number>, e: { category: string; amount_cents: number }) => {
-			acc[e.category] = (acc[e.category] ?? 0) + e.amount_cents;
-			return acc;
-		}, {} as Record<string, number>)}
-		{#if Object.keys(catTotals).length > 1}
-			<div class="cat-subtotals">
-				{#each Object.entries(catTotals) as [cat, cents]}
-					<span class="cat-sub"><span class="badge need">{cat}</span> {fmtAmount(cents as number)}</span>
+					</li>
 				{/each}
+			</ul>
+
+			{@const catTotals = data.expenses.reduce(
+				(acc: Record<string, number>, e: { category: string; amount_cents: number }) => {
+					acc[e.category] = (acc[e.category] ?? 0) + e.amount_cents;
+					return acc;
+				},
+				{} as Record<string, number>
+			)}
+			{#if Object.keys(catTotals).length > 1}
+				<div class="cat-subtotals">
+					{#each Object.entries(catTotals) as [cat, cents]}
+						<span class="cat-sub"
+							><span class="badge need">{cat}</span> {fmtAmount(cents as number)}</span
+						>
+					{/each}
+				</div>
+			{/if}
+
+			<div class="exp-total-row">
+				<span>Total</span>
+				<span class="exp-amount">{fmtAmount(expenseTotal)}</span>
 			</div>
 		{/if}
 
-		<div class="exp-total-row">
-			<span>Total</span>
-			<span class="exp-amount">{fmtAmount(expenseTotal)}</span>
-		</div>
-	{/if}
+		{#if !isViewer}
+			<details class="paste">
+				<summary>Add expense</summary>
 
-	{#if !isViewer}
-		<details class="paste">
-			<summary>Add expense</summary>
-
-			<div class="extract">
-				<p class="extract-head">Extract from a bank statement or receipt</p>
-				<form
-					method="POST"
-					action="?/exp-extract"
-					class="extract-form"
-					use:enhance={() => {
-						expExtracting = true;
-						expExtractMsg = '';
-						return async ({ result }) => {
-							expExtracting = false;
-							if (result.type === 'success' && result.data?.ok) {
-								const raw = (result.data as { candidates?: Array<{ expense_date: string | null; description: string; amount: number; category: string | null; notes: string | null }> }).candidates ?? [];
-								expCandidates = raw.map(c => ({ ...c, selected: true }));
-								if (raw.length === 0) {
-									expExtractMsg = 'No transactions found in the text.';
-								} else {
-									expExtractMsg = `${raw.length} transaction${raw.length > 1 ? 's' : ''} found — review below.`;
-								}
-							} else if (result.type === 'failure') {
-								expExtractMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
-							} else {
-								expExtractMsg = 'Extraction failed.';
-							}
-						};
-					}}
-				>
-					<input type="hidden" name="source" value="text" />
-					<textarea
-						name="text"
-						rows="4"
-						bind:value={expExtractText}
-						placeholder="Paste bank statement text, credit card transactions, or a receipt..."
-					></textarea>
-					<div class="extract-actions">
-						<button class="btn small" type="submit" disabled={expExtracting || !expExtractText.trim()}>
-							{expExtracting ? 'Extracting...' : 'Extract expenses'}
-						</button>
-						<label class="extract-opt">
-							<input type="checkbox" bind:checked={expSaveTextAsDoc} />
-							Also save text as document
-						</label>
-					</div>
-				</form>
-
-				{#if extractableDocs.length > 0}
+				<div class="extract">
+					<p class="extract-head">Extract from a bank statement or receipt</p>
 					<form
 						method="POST"
 						action="?/exp-extract"
@@ -2263,106 +2903,214 @@
 							return async ({ result }) => {
 								expExtracting = false;
 								if (result.type === 'success' && result.data?.ok) {
-									const raw = (result.data as { candidates?: Array<{ expense_date: string | null; description: string; amount: number; category: string | null; notes: string | null }> }).candidates ?? [];
-									expCandidates = raw.map(c => ({ ...c, selected: true }));
+									const raw =
+										(
+											result.data as {
+												candidates?: Array<{
+													expense_date: string | null;
+													description: string;
+													amount: number;
+													category: string | null;
+													notes: string | null;
+												}>;
+											}
+										).candidates ?? [];
+									expCandidates = raw.map((c) => ({ ...c, selected: true }));
 									if (raw.length === 0) {
-										expExtractMsg = 'No transactions found in the document.';
+										expExtractMsg = 'No transactions found in the text.';
 									} else {
 										expExtractMsg = `${raw.length} transaction${raw.length > 1 ? 's' : ''} found — review below.`;
 									}
 								} else if (result.type === 'failure') {
-									expExtractMsg = (result.data as { error?: string })?.error ?? 'Extraction failed.';
+									expExtractMsg =
+										(result.data as { error?: string })?.error ?? 'Extraction failed.';
 								} else {
 									expExtractMsg = 'Extraction failed.';
 								}
 							};
 						}}
 					>
-						<input type="hidden" name="source" value="document" />
-						<select name="attachment_id" bind:value={expExtractDocId} aria-label="document">
-							<option value="" disabled>Choose a document...</option>
-							{#each extractableDocs as a (a.id)}
+						<input type="hidden" name="source" value="text" />
+						<textarea
+							name="text"
+							rows="4"
+							bind:value={expExtractText}
+							placeholder="Paste bank statement text, credit card transactions, or a receipt..."
+						></textarea>
+						<div class="extract-actions">
+							<button
+								class="btn small"
+								type="submit"
+								disabled={expExtracting || !expExtractText.trim()}
+							>
+								{expExtracting ? 'Extracting...' : 'Extract expenses'}
+							</button>
+							<label class="extract-opt">
+								<input type="checkbox" bind:checked={expSaveTextAsDoc} />
+								Also save text as document
+							</label>
+						</div>
+					</form>
+
+					{#if extractableDocs.length > 0}
+						<form
+							method="POST"
+							action="?/exp-extract"
+							class="extract-form"
+							use:enhance={() => {
+								expExtracting = true;
+								expExtractMsg = '';
+								return async ({ result }) => {
+									expExtracting = false;
+									if (result.type === 'success' && result.data?.ok) {
+										const raw =
+											(
+												result.data as {
+													candidates?: Array<{
+														expense_date: string | null;
+														description: string;
+														amount: number;
+														category: string | null;
+														notes: string | null;
+													}>;
+												}
+											).candidates ?? [];
+										expCandidates = raw.map((c) => ({ ...c, selected: true }));
+										if (raw.length === 0) {
+											expExtractMsg = 'No transactions found in the document.';
+										} else {
+											expExtractMsg = `${raw.length} transaction${raw.length > 1 ? 's' : ''} found — review below.`;
+										}
+									} else if (result.type === 'failure') {
+										expExtractMsg =
+											(result.data as { error?: string })?.error ?? 'Extraction failed.';
+									} else {
+										expExtractMsg = 'Extraction failed.';
+									}
+								};
+							}}
+						>
+							<input type="hidden" name="source" value="document" />
+							<select name="attachment_id" bind:value={expExtractDocId} aria-label="document">
+								<option value="" disabled>Choose a document...</option>
+								{#each extractableDocs as a (a.id)}
+									<option value={a.id}>{a.display_name || a.original_name}</option>
+								{/each}
+							</select>
+							<button class="btn small" type="submit" disabled={expExtracting || !expExtractDocId}>
+								{expExtracting ? 'Extracting...' : 'Extract from document'}
+							</button>
+						</form>
+					{/if}
+					{#if expExtractMsg}<p class="extract-msg">{expExtractMsg}</p>{/if}
+				</div>
+
+				{#if expCandidates.length > 0}
+					<div class="candidates">
+						<div class="cand-list">
+							{#each expCandidates as c, i}
+								<div class="cand-row">
+									<input type="checkbox" bind:checked={c.selected} />
+									<span class="cand-date">{c.expense_date ?? '--'}</span>
+									<span class="cand-desc">{c.description}</span>
+									<span class="cand-amount">${c.amount.toFixed(2)}</span>
+									<select bind:value={c.category} class="cand-cat" aria-label="category">
+										{#each ['lodging', 'food', 'transport', 'activities', 'other'] as cat (cat)}
+											<option value={cat}>{cat}</option>
+										{/each}
+									</select>
+								</div>
+							{/each}
+						</div>
+						<div class="cand-actions">
+							<button
+								class="btn small"
+								type="button"
+								onclick={() => expCandidates.forEach((c) => (c.selected = true))}>Select all</button
+							>
+							<button
+								class="btn small"
+								type="button"
+								onclick={() => expCandidates.forEach((c) => (c.selected = false))}
+								>Select none</button
+							>
+							<button
+								class="btn small primary"
+								type="button"
+								onclick={addSelectedExpenses}
+								disabled={!expCandidates.some((c) => c.selected)}
+							>
+								Add {expCandidates.filter((c) => c.selected).length} expense{expCandidates.filter(
+									(c) => c.selected
+								).length !== 1
+									? 's'
+									: ''}
+							</button>
+							<button
+								class="btn small"
+								type="button"
+								onclick={() => {
+									expCandidates = [];
+									expExtractMsg = '';
+								}}>Clear</button
+							>
+						</div>
+					</div>
+				{/if}
+
+				<form
+					method="POST"
+					action="?/exp-add"
+					class="edit-form"
+					use:enhance={() => {
+						return async ({ result, update }) => {
+							if (result.type === 'success') {
+								expDraft = emptyExpDraft();
+							}
+							await update();
+						};
+					}}
+				>
+					<p class="extract-head" style="margin-top: 8px">Or add manually</p>
+					<div class="form-row">
+						<input type="date" name="expense_date" bind:value={expDraft.expense_date} />
+						<select name="category" aria-label="category" bind:value={expDraft.category}>
+							{#each ['lodging', 'food', 'transport', 'activities', 'other'] as c (c)}
+								<option value={c}>{c}</option>
+							{/each}
+						</select>
+					</div>
+					<input
+						name="description"
+						placeholder="Description (required)"
+						required
+						bind:value={expDraft.description}
+					/>
+					<div class="form-row">
+						<input
+							name="amount"
+							placeholder="$0.00"
+							inputmode="decimal"
+							required
+							bind:value={expDraft.amount}
+						/>
+						<select
+							name="attachment_id"
+							aria-label="linked document"
+							bind:value={expDraft.attachment_id}
+						>
+							<option value="">Link document (optional)</option>
+							{#each data.attachments as a (a.id)}
 								<option value={a.id}>{a.display_name || a.original_name}</option>
 							{/each}
 						</select>
-						<button class="btn small" type="submit" disabled={expExtracting || !expExtractDocId}>
-							{expExtracting ? 'Extracting...' : 'Extract from document'}
-						</button>
-					</form>
-				{/if}
-				{#if expExtractMsg}<p class="extract-msg">{expExtractMsg}</p>{/if}
-			</div>
-
-			{#if expCandidates.length > 0}
-				<div class="candidates">
-					<div class="cand-list">
-						{#each expCandidates as c, i}
-							<div class="cand-row">
-								<input type="checkbox" bind:checked={c.selected} />
-								<span class="cand-date">{c.expense_date ?? '--'}</span>
-								<span class="cand-desc">{c.description}</span>
-								<span class="cand-amount">${c.amount.toFixed(2)}</span>
-								<select bind:value={c.category} class="cand-cat" aria-label="category">
-									{#each ['lodging', 'food', 'transport', 'activities', 'other'] as cat (cat)}
-										<option value={cat}>{cat}</option>
-									{/each}
-								</select>
-							</div>
-						{/each}
 					</div>
-					<div class="cand-actions">
-						<button class="btn small" type="button"
-							onclick={() => expCandidates.forEach(c => c.selected = true)}>Select all</button>
-						<button class="btn small" type="button"
-							onclick={() => expCandidates.forEach(c => c.selected = false)}>Select none</button>
-						<button class="btn small primary" type="button"
-							onclick={addSelectedExpenses}
-							disabled={!expCandidates.some(c => c.selected)}>
-							Add {expCandidates.filter(c => c.selected).length} expense{expCandidates.filter(c => c.selected).length !== 1 ? 's' : ''}
-						</button>
-						<button class="btn small" type="button"
-							onclick={() => { expCandidates = []; expExtractMsg = ''; }}>Clear</button>
-					</div>
-				</div>
-			{/if}
-
-			<form
-				method="POST"
-				action="?/exp-add"
-				class="edit-form"
-				use:enhance={() => {
-					return async ({ result, update }) => {
-						if (result.type === 'success') {
-							expDraft = emptyExpDraft();
-						}
-						await update();
-					};
-				}}
-			>
-				<p class="extract-head" style="margin-top: 8px">Or add manually</p>
-				<div class="form-row">
-					<input type="date" name="expense_date" bind:value={expDraft.expense_date} />
-					<select name="category" aria-label="category" bind:value={expDraft.category}>
-						{#each ['lodging', 'food', 'transport', 'activities', 'other'] as c (c)}
-							<option value={c}>{c}</option>
-						{/each}
-					</select>
-				</div>
-				<input name="description" placeholder="Description (required)" required bind:value={expDraft.description} />
-				<div class="form-row">
-					<input name="amount" placeholder="$0.00" inputmode="decimal" required bind:value={expDraft.amount} />
-					<select name="attachment_id" aria-label="linked document" bind:value={expDraft.attachment_id}>
-						<option value="">Link document (optional)</option>
-						{#each data.attachments as a (a.id)}
-							<option value={a.id}>{a.display_name || a.original_name}</option>
-						{/each}
-					</select>
-				</div>
-				<textarea name="notes" rows="1" placeholder="Notes (optional)" bind:value={expDraft.notes}></textarea>
-				<button class="btn small primary" type="submit">Add expense</button>
-			</form>
-		</details>
-	{/if}
+					<textarea name="notes" rows="1" placeholder="Notes (optional)" bind:value={expDraft.notes}
+					></textarea>
+					<button class="btn small primary" type="submit">Add expense</button>
+				</form>
+			</details>
+		{/if}
 	{/if}
 </div>
 
@@ -2959,12 +3707,27 @@
 	}
 	.leg-links,
 	.dayplan-preview,
-	.quick-groups {
+	.quick-groups,
+	.route-tools {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 6px;
 		margin-top: 8px;
 		align-items: center;
+	}
+	.route-tools select {
+		flex: 1 1 180px;
+		max-width: 320px;
+	}
+	.route-status {
+		color: var(--muted);
+		font-size: 0.85rem;
+		margin: 4px 0 0;
+	}
+	.drive-leg {
+		color: var(--muted);
+		font-size: 0.78rem;
+		margin: 4px 0 4px 30px;
 	}
 	.dayplan-builder {
 		display: grid;
@@ -2985,6 +3748,69 @@
 	}
 	.dayplan-picker select {
 		flex: 1 1 220px;
+	}
+	.dayplan-search {
+		flex: 1 1 100%;
+		font-size: 16px;
+	}
+	.weather-strip {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px 12px;
+		font-size: 0.85rem;
+		color: var(--fg-muted, #666);
+		margin-top: 4px;
+	}
+	.weather-strip.stale {
+		opacity: 0.7;
+	}
+	.weather-loc {
+		font-weight: 600;
+		flex-basis: 100%;
+	}
+	.weather-period strong {
+		font-weight: 600;
+	}
+	.weather-stale-badge {
+		font-size: 0.75rem;
+		background: var(--bg-warning, #f5e6c8);
+		color: var(--fg-warning, #7a5c00);
+		padding: 0 4px;
+		border-radius: 3px;
+	}
+	.ai-note {
+		font-size: 0.85rem;
+		color: var(--fg-muted, #666);
+		font-style: italic;
+		margin-top: 2px;
+		padding-left: 26px;
+	}
+	.dayplan-ai-tools {
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+		margin-top: 8px;
+	}
+	.suggestions-panel {
+		margin-top: 8px;
+		padding: 8px;
+		border: 1px solid var(--border, #ddd);
+		border-radius: 6px;
+	}
+	.suggestions-heading {
+		font-size: 0.85rem;
+		font-weight: 600;
+		margin: 4px 0;
+	}
+	.suggestions-heading:first-child {
+		margin-top: 0;
+	}
+	.suggestion-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 4px 0;
+		font-size: 0.9rem;
 	}
 	.builder-stops input {
 		width: 100%;
