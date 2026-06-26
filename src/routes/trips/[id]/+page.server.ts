@@ -1205,9 +1205,11 @@ export const actions: Actions = {
 	},
 
 	// ── Trip-level ─────────────────────────────────────────
-	duplicate: async ({ params, locals }) => {
+	duplicate: async ({ params, request, locals }) => {
 		const { ownerId, tripId } = ctx(locals, params);
-		const newId = await duplicateTrip(ownerId, tripId);
+		const form = await request.formData();
+		const timeZone = (form.get('client_time_zone') ?? '').toString();
+		const newId = await duplicateTrip(ownerId, tripId, timeZone);
 		if (!newId) throw error(404, 'Trip not found');
 		throw redirect(303, `/trips/${newId}`);
 	},

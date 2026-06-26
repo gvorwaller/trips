@@ -29,6 +29,7 @@
 	const isViewer = $derived(data.user?.role === 'viewer');
 	const MAPS_API_KEY = env.PUBLIC_GOOGLE_MAPS_API_KEY ?? '';
 	let selectedPin = $state<number | null>(null);
+	let localTimeZone = $state('');
 
 	// Inline "insert item above/below this row" (td-4aa8c4). Clicking a row's ＋
 	// opens a one-off input positioned exactly where the new item will land, so a
@@ -972,6 +973,7 @@
 	let packCollapsed = $state<Set<number>>(new Set());
 
 	onMount(() => {
+		localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
 		itinCollapsed = loadIds(itinKey);
 		packCollapsed = loadIds(packKey);
 	});
@@ -3119,6 +3121,7 @@
 	<div class="form-actions">
 		<a class="btn" href="/trips/{data.trip.id}/edit">Edit trip</a>
 		<form method="POST" action="?/duplicate" use:enhance class="inline">
+			<input type="hidden" name="client_time_zone" value={localTimeZone} />
 			<button class="btn" type="submit">Duplicate</button>
 		</form>
 		<button

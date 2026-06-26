@@ -10,7 +10,11 @@ import { copyObject, storageConfigured } from './storage';
  * File attachments get a new S3 object copy. Checked/visited state is reset.
  * Returns the new trip id, or null if not owned.
  */
-export async function duplicateTrip(ownerId: number, tripId: number): Promise<number | null> {
+export async function duplicateTrip(
+	ownerId: number,
+	tripId: number,
+	timeZone?: string | null
+): Promise<number | null> {
 	return withTransaction(async (client) => {
 		const trip = await client.query<{
 			name: string;
@@ -27,7 +31,7 @@ export async function duplicateTrip(ownerId: number, tripId: number): Promise<nu
 		const newTrip = await client.query<{ id: number }>(
 			`INSERT INTO trips (owner_id, name, start_date, end_date, notes)
 			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-			[ownerId, duplicateTripName(t.name), t.start_date, t.end_date, t.notes]
+			[ownerId, duplicateTripName(t.name, new Date(), timeZone), t.start_date, t.end_date, t.notes]
 		);
 		const newTripId = newTrip.rows[0].id;
 
