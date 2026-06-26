@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { withTransaction } from '$lib/db';
+import { duplicateTripName } from '$lib/duplicate-name';
 import { orderParentsFirst } from './tree';
 import { copyObject, storageConfigured } from './storage';
 
@@ -26,7 +27,7 @@ export async function duplicateTrip(ownerId: number, tripId: number): Promise<nu
 		const newTrip = await client.query<{ id: number }>(
 			`INSERT INTO trips (owner_id, name, start_date, end_date, notes)
 			 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-			[ownerId, `${t.name} (copy)`, t.start_date, t.end_date, t.notes]
+			[ownerId, duplicateTripName(t.name), t.start_date, t.end_date, t.notes]
 		);
 		const newTripId = newTrip.rows[0].id;
 
