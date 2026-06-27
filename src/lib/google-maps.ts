@@ -7,6 +7,7 @@ export interface PickedLocation {
 	lat: number;
 	lng: number;
 	label: string;
+	place_id: string | null;
 }
 
 const GOOGLE_MAPS_CALLBACK = '__tripsGoogleMapsLoaded__';

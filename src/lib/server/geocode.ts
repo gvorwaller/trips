@@ -10,6 +10,7 @@ export interface GeoResult {
 	lat: number;
 	lng: number;
 	name: string;
+	place_id: string | null;
 	bounds: unknown | null;
 }
 
@@ -19,10 +20,11 @@ interface GoogleGeocodeResponse {
 	results?: {
 		geometry: { location: { lat: number; lng: number }; viewport?: unknown };
 		formatted_address?: string;
+		place_id?: string;
 	}[];
 }
 
-async function call(params: Record<string, string>): Promise<GeoResult | null> {
+async function geocodeCall(params: Record<string, string>): Promise<GeoResult | null> {
 	if (!env.GOOGLE_GEOCODING_KEY) return null;
 	const url = new URL('https://maps.googleapis.com/maps/api/geocode/json');
 	url.searchParams.set('key', env.GOOGLE_GEOCODING_KEY);
@@ -42,18 +44,70 @@ async function call(params: Record<string, string>): Promise<GeoResult | null> {
 		lat: top.geometry.location.lat,
 		lng: top.geometry.location.lng,
 		name: top.formatted_address ?? (params.address || ''),
+		place_id: top.place_id ?? null,
 		bounds: top.geometry.viewport ?? null
 	};
 }
 
-export function geocodePlace(query: string): Promise<GeoResult | null> {
+interface GooglePlacesTextResponse {
+	status: string;
+	error_message?: string;
+	results?: {
+		name?: string;
+		formatted_address?: string;
+		place_id?: string;
+		geometry?: { location?: { lat: number; lng: number }; viewport?: unknown };
+	}[];
+}
+
+async function placesTextSearch(
+	query: string,
+	opts: { lat?: number; lng?: number; radiusM?: number } = {}
+): Promise<GeoResult | null> {
+	if (!env.GOOGLE_GEOCODING_KEY) return null;
+	const url = new URL('https://maps.googleapis.com/maps/api/place/textsearch/json');
+	url.searchParams.set('key', env.GOOGLE_GEOCODING_KEY);
+	url.searchParams.set('query', query);
+	if (Number.isFinite(opts.lat) && Number.isFinite(opts.lng)) {
+		url.searchParams.set('location', `${opts.lat},${opts.lng}`);
+		url.searchParams.set('radius', String(Math.round(opts.radiusM ?? 500)));
+	}
+
+	let res: Response;
+	try {
+		res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+	} catch {
+		return null;
+	}
+	if (!res.ok) return null;
+	const data = (await res.json()) as GooglePlacesTextResponse;
+	if (data.status !== 'OK' || !data.results?.length) return null;
+	const top = data.results[0];
+	if (!top.geometry?.location) return null;
+	return {
+		lat: top.geometry.location.lat,
+		lng: top.geometry.location.lng,
+		name: top.name ?? top.formatted_address ?? query,
+		place_id: top.place_id ?? null,
+		bounds: top.geometry.viewport ?? null
+	};
+}
+
+export async function geocodePlace(
+	query: string,
+	opts: { lat?: number; lng?: number; radiusM?: number } = {}
+): Promise<GeoResult | null> {
 	const q = query.trim();
 	if (!q || q.length > 200) return Promise.resolve(null);
-	return call({ address: q });
+	return (await placesTextSearch(q, opts)) ?? geocodeCall({ address: q });
+}
+
+export async function reverseGeocodeLocation(lat: number, lng: number): Promise<GeoResult | null> {
+	return geocodeCall({ latlng: `${lat},${lng}` });
 }
 
 export async function reverseGeocode(lat: number, lng: number): Promise<string | null> {
-	const r = await call({ latlng: `${lat},${lng}` });
+	const r = await geocodeCall({ latlng: `${lat},${lng}` });
 	return r?.name ?? null;
 }
 
@@ -65,6 +119,7 @@ export interface NearbyPlace {
 	name: string;
 	lat: number;
 	lng: number;
+	place_id: string | null;
 	vicinity: string | null;
 	types: string[];
 }
@@ -81,6 +136,7 @@ interface GooglePlacesResponse {
 	error_message?: string;
 	results?: {
 		name?: string;
+		place_id?: string;
 		geometry?: { location?: { lat: number; lng: number } };
 		vicinity?: string;
 		types?: string[];
@@ -119,6 +175,7 @@ export async function placesNearby(
 			name: r.name ?? 'Point of interest',
 			lat: r.geometry!.location!.lat,
 			lng: r.geometry!.location!.lng,
+			place_id: r.place_id ?? null,
 			vicinity: r.vicinity ?? null,
 			types: r.types ?? []
 		}));

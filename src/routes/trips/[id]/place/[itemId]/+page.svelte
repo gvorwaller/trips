@@ -27,6 +27,7 @@
 		<form method="POST" action="?/save">
 			<input type="hidden" name="lat" value={picked?.lat ?? data.item.lat ?? ''} />
 			<input type="hidden" name="lon" value={picked?.lng ?? data.item.lon ?? ''} />
+			<input type="hidden" name="place_id" value={picked?.place_id ?? data.item.place_id ?? ''} />
 			<button class="btn primary" type="submit" disabled={!hasCoords}>Save location</button>
 		</form>
 		{#if data.item.lat != null}

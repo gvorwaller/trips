@@ -763,6 +763,7 @@ export const actions: Actions = {
 			lat: number;
 			lng: number;
 			distance_km: number;
+			place_id: string | null;
 			vicinity: string | null;
 		}> = [];
 		const nearbyResult = await placesNearbyCached(centroidLat, centroidLon);
@@ -771,7 +772,10 @@ export const actions: Actions = {
 			const itinNames = new Set(itinerary.map((i) => i.title.toLowerCase()));
 			external = nearbyResult.places
 				.filter(
-					(p) => !internalNames.has(p.name.toLowerCase()) && !itinNames.has(p.name.toLowerCase())
+					(p) =>
+						p.place_id &&
+						!internalNames.has(p.name.toLowerCase()) &&
+						!itinNames.has(p.name.toLowerCase())
 				)
 				.map((p) => ({
 					source: 'external' as const,
@@ -779,6 +783,7 @@ export const actions: Actions = {
 					lat: p.lat,
 					lng: p.lng,
 					distance_km: Math.round(haversineKm(centroidLat, centroidLon, p.lat, p.lng) * 10) / 10,
+					place_id: p.place_id,
 					vicinity: p.vicinity
 				}));
 		}
@@ -795,6 +800,7 @@ export const actions: Actions = {
 		if (!name) return fail(400, { error: 'Name is required.' });
 		const lat = Number(form.get('lat'));
 		const lng = Number(form.get('lng'));
+		const placeId = (form.get('place_id') ?? '').toString().trim() || null;
 		const hasCoords =
 			Number.isFinite(lat) &&
 			Number.isFinite(lng) &&
@@ -805,6 +811,9 @@ export const actions: Actions = {
 		const existingId = optId(form.get('itinerary_item_id'));
 		if (!existingId && !hasCoords) {
 			return fail(400, { error: 'External suggestions require valid coordinates.' });
+		}
+		if (!existingId && !placeId) {
+			return fail(400, { error: 'External suggestions require a Google place ID.' });
 		}
 		const plans = await listDayPlans(tripId);
 		if (!plans.some((p) => p.id === planId)) {
@@ -822,7 +831,7 @@ export const actions: Actions = {
 				notes: (form.get('vicinity') ?? '').toString().trim() || null
 			});
 			if (hasCoords) {
-				await setLocation(tripId, itemId, lat, lng, null);
+				await setLocation(tripId, itemId, lat, lng, placeId);
 			}
 		}
 

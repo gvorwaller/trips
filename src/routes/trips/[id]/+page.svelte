@@ -212,6 +212,7 @@
 		location_query: string | null;
 		lat: number | null;
 		lon: number | null;
+		place_id: string | null;
 		children: ItinCandidateRaw[];
 		duplicate?: boolean;
 		duplicate_title?: string | null;
@@ -403,6 +404,7 @@
 		lng: number;
 		distance_km: number;
 		itinerary_item_id?: number;
+		place_id?: string | null;
 		vicinity: string | null;
 	};
 	let suggestBusy = $state<number | null>(null);
@@ -803,6 +805,7 @@
 		fd.set('name', sug.name);
 		fd.set('lat', String(sug.lat));
 		fd.set('lng', String(sug.lng));
+		fd.set('place_id', sug.place_id ?? '');
 		fd.set('vicinity', sug.vicinity ?? '');
 		if (sug.source === 'internal' && sug.itinerary_item_id) {
 			fd.set('itinerary_item_id', String(sug.itinerary_item_id));
@@ -1279,6 +1282,50 @@
 	</div>
 
 	{#if !sectionsCollapsed.has('dayplans')}
+		<details class="dayplan-help">
+			<summary>How day plans work</summary>
+			<div class="dayplan-help-body">
+				<details>
+					<summary>Building a day plan</summary>
+					<ol>
+						<li>Click <strong>Build day</strong> to open the builder.</li>
+						<li>Type a <strong>title</strong> (required) and optionally pick a date.</li>
+						<li>Add stops — either click a <strong>group chip</strong> (e.g. "Anniversary & Dining Out") to load all places from that itinerary section at once, or pick individual places from the dropdown and click <strong>Add place</strong>. The "Filter places" box narrows the dropdown by name.</li>
+						<li>Reorder with the arrow buttons, add per-stop notes if you like.</li>
+						<li>Click <strong>Save day</strong> — requires a title and at least one stop.</li>
+					</ol>
+				</details>
+				<details>
+					<summary>After saving: stops, routes, and driving</summary>
+					<ol>
+						<li>Your saved plan shows stops, visited count, and weather (US only, if a date is set).</li>
+						<li>Each stop has a <strong>checkbox</strong> to mark visited and a <strong>Google</strong> link to open it on a map.</li>
+						<li>Use <strong>Calculate distances</strong> to get driving time between each leg via Google Directions.</li>
+						<li>Use <strong>Optimize order</strong> to sort stops by shortest driving route. Pick an anchor (your lodging) from the dropdown first.</li>
+						<li><strong>Open directions</strong> opens the full multi-stop route in Google Maps.</li>
+						<li>Individual <strong>Leg</strong> links open each segment separately.</li>
+					</ol>
+				</details>
+				<details>
+					<summary>AI tools and suggestions</summary>
+					<ol>
+						<li><strong>Get visit notes</strong> generates 1–3 sentence tips per stop (best time to visit, logistics, weather-aware advice).</li>
+						<li><strong>Suggest stops</strong> finds nearby places — both from your own itinerary and from Google Places (landmarks, museums, etc.).</li>
+						<li>Click <strong>Add</strong> on any suggestion to add it as a stop.</li>
+					</ol>
+				</details>
+				<details>
+					<summary>Editing a saved plan</summary>
+					<ol>
+						<li>Click <strong>edit plan</strong> to change the title, date, or notes.</li>
+						<li>Use the <strong>Add a place</strong> form at the bottom to add more stops.</li>
+						<li>Remove individual stops or reorder them with the arrows.</li>
+						<li>The <strong>delete button</strong> (✕) removes the entire plan.</li>
+					</ol>
+				</details>
+			</div>
+		</details>
+
 		{#if data.dayPlans.length === 0}
 			<p class="muted">No day plans yet.</p>
 		{:else}
@@ -1361,201 +1408,208 @@
 							</div>
 						</div>
 
-						<details class="dayplan-details">
-							<summary>Stops</summary>
-							{#if stops.length === 0}
-								<p class="muted">No stops saved.</p>
-							{:else}
+						<details class="dayplan-details" open>
+							<summary>Stops ({planProgress(stops)})</summary>
+							<div class="dayplan-stops-section">
+								{#if stops.length === 0}
+									<p class="muted">No stops saved.</p>
+								{:else}
+									{#if !isViewer}
+										<div class="route-tools">
+											<select
+												aria-label="route anchor"
+												value={savedPlanAnchors[plan.id] ?? 'none'}
+												onchange={(e) =>
+													(savedPlanAnchors = {
+														...savedPlanAnchors,
+														[plan.id]: e.currentTarget.value
+													})}
+											>
+												{#each anchorOptions(plan.optional_date) as anchor (anchor.value)}
+													<option value={anchor.value}>{anchor.label}</option>
+												{/each}
+											</select>
+											<button
+												class="btn small"
+												type="button"
+												disabled={!canCalculateDriving(stops) || dayPlanRouteBusy === plan.id}
+												onclick={() => calculateSavedDriving(plan.id, stops)}
+											>
+												{dayPlanRouteBusy === plan.id ? 'Working...' : 'Calculate distances'}
+											</button>
+											<button
+												class="btn small primary"
+												type="button"
+												disabled={!canOptimizeRoute(savedRouteStops(stops)) ||
+													dayPlanRouteBusy === plan.id}
+												onclick={() =>
+													optimizeSavedPlan(
+														plan.id,
+														plan.optional_date,
+														savedPlanAnchors[plan.id] ?? 'none',
+														stops
+													)}
+											>
+												Optimize order
+											</button>
+										</div>
+										{#if dayPlanRouteStatus[plan.id]}
+											<p class="route-status">{dayPlanRouteStatus[plan.id]}</p>
+										{/if}
+									{/if}
+									<ol class="dayplan-stops">
+										{#each stops as stop, i (stop.id)}
+											{@const leg = i > 0 ? legSummary(stops[i - 1], stop) : null}
+											<li>
+												{#if leg}<div class="drive-leg">Drive from previous: {leg}</div>{/if}
+												<div class="dayplan-stop-row">
+													<label class="dayplan-visited">
+														<input
+															type="checkbox"
+															checked={stop.visited}
+															onchange={(e) => toggleVisited(stop.id, e.currentTarget.checked)}
+														/>
+														<span class:done={stop.visited}>{stop.snapshot_title}</span>
+													</label>
+													<div class="dayplan-stop-links">
+														<a
+															class="chip-link"
+															href={googleMapsLink(savedStopPlace(stop))}
+															target="_blank"
+															rel="noopener">Google</a
+														>
+														{#if !isViewer}
+															<button
+																type="button"
+																title="move up"
+																disabled={i === 0}
+																onclick={() => reorderSavedStop(plan.id, stop.id, -1)}
+																>↑</button
+															>
+															<button
+																type="button"
+																title="move down"
+																disabled={i === stops.length - 1}
+																onclick={() => reorderSavedStop(plan.id, stop.id, 1)}
+																>↓</button
+															>
+															<form
+																method="POST"
+																action="?/dayplan-remove-stop"
+																use:enhance
+																class="inline"
+															>
+																<input type="hidden" name="id" value={stop.id} />
+																<button type="submit" class="del">Remove</button>
+															</form>
+														{/if}
+													</div>
+												</div>
+												{#if stop.notes}<div class="meta dayplan-stop-note">{stop.notes}</div>{/if}
+												{#if stop.ai_notes}<div class="ai-note">{stop.ai_notes}</div>{/if}
+												{#if !isViewer}
+													<form
+														method="POST"
+														action="?/dayplan-stop-notes"
+														use:enhance={() => {
+															return async ({ update }) => {
+																await update({ reset: false });
+															};
+														}}
+														class="dayplan-note-form"
+													>
+														<input type="hidden" name="id" value={stop.id} />
+														<input name="notes" value={stop.notes ?? ''} placeholder="Stop note" />
+														<button class="btn small" type="submit">Save</button>
+													</form>
+												{/if}
+											</li>
+										{/each}
+									</ol>
+								{/if}
+
+								{#if legLinks}
+									<div class="leg-links">
+										{#each legLinks as leg, i}
+											<a class="chip-link route" href={leg.url} target="_blank" rel="noopener">
+												Leg {i + 1}: {leg.from} to {leg.to}
+											</a>
+										{/each}
+									</div>
+								{/if}
+
 								{#if !isViewer}
-									<div class="route-tools">
-										<select
-											aria-label="route anchor"
-											value={savedPlanAnchors[plan.id] ?? 'none'}
-											onchange={(e) =>
-												(savedPlanAnchors = {
-													...savedPlanAnchors,
-													[plan.id]: e.currentTarget.value
-												})}
-										>
-											{#each anchorOptions(plan.optional_date) as anchor (anchor.value)}
-												<option value={anchor.value}>{anchor.label}</option>
-											{/each}
-										</select>
+									<div class="dayplan-ai-tools">
 										<button
 											class="btn small"
 											type="button"
-											disabled={!canCalculateDriving(stops) || dayPlanRouteBusy === plan.id}
-											onclick={() => calculateSavedDriving(plan.id, stops)}
+											disabled={aiNotesBusy === plan.id || stops.length === 0}
+											onclick={() => fetchAiNotes(plan.id)}
 										>
-											{dayPlanRouteBusy === plan.id ? 'Working...' : 'Calculate distances'}
+											{aiNotesBusy === plan.id ? 'Generating...' : 'Get visit notes'}
 										</button>
 										<button
-											class="btn small primary"
+											class="btn small"
 											type="button"
-											disabled={!canOptimizeRoute(savedRouteStops(stops)) ||
-												dayPlanRouteBusy === plan.id}
-											onclick={() =>
-												optimizeSavedPlan(
-													plan.id,
-													plan.optional_date,
-													savedPlanAnchors[plan.id] ?? 'none',
-													stops
-												)}
+											disabled={suggestBusy === plan.id || !canSuggestStops(stops)}
+											onclick={() => fetchSuggestions(plan.id)}
 										>
-											Optimize order
+											{suggestBusy === plan.id ? 'Loading...' : 'Suggest stops'}
 										</button>
 									</div>
-									{#if dayPlanRouteStatus[plan.id]}
-										<p class="route-status">{dayPlanRouteStatus[plan.id]}</p>
+									{#if aiNotesError[plan.id]}
+										<p class="field-error">{aiNotesError[plan.id]}</p>
 									{/if}
-								{/if}
-								<ol class="dayplan-stops">
-									{#each stops as stop, i (stop.id)}
-										{@const leg = i > 0 ? legSummary(stops[i - 1], stop) : null}
-										<li>
-											{#if leg}<div class="drive-leg">Drive from previous: {leg}</div>{/if}
-											<div class="dayplan-stop-row">
-												<label class="dayplan-visited">
-													<input
-														type="checkbox"
-														checked={stop.visited}
-														onchange={(e) => toggleVisited(stop.id, e.currentTarget.checked)}
-													/>
-													<span class:done={stop.visited}>{stop.snapshot_title}</span>
-												</label>
-												<div class="dayplan-stop-links">
-													<a
-														class="chip-link"
-														href={googleMapsLink(savedStopPlace(stop))}
-														target="_blank"
-														rel="noopener">Google</a
-													>
-													{#if !isViewer}
-														<button
-															type="button"
-															title="move up"
-															disabled={i === 0}
-															onclick={() => reorderSavedStop(plan.id, stop.id, -1)}>↑</button
-														>
-														<button
-															type="button"
-															title="move down"
-															disabled={i === stops.length - 1}
-															onclick={() => reorderSavedStop(plan.id, stop.id, 1)}>↓</button
-														>
-														<form
-															method="POST"
-															action="?/dayplan-remove-stop"
-															use:enhance
-															class="inline"
-														>
-															<input type="hidden" name="id" value={stop.id} />
-															<button type="submit" class="del">Remove</button>
-														</form>
-													{/if}
-												</div>
+									{#if suggestions[plan.id]}
+										{@const s = suggestions[plan.id]}
+										{#if s.internal.length > 0 || s.external.length > 0}
+											<div class="suggestions-panel">
+												{#if s.internal.length > 0}
+													<p class="suggestions-heading">From your itinerary</p>
+													{#each s.internal as sug}
+														<div class="suggestion-row">
+															<span class="grow"
+																>{sug.name}<span class="muted">
+																	— {formatKm(sug.distance_km)} from route{#if sug.vicinity}
+																		— {sug.vicinity}{/if}</span
+																></span
+															>
+															<button
+																class="btn small"
+																type="button"
+																onclick={() => addSuggestionAsStop(plan.id, sug)}>Add</button
+															>
+														</div>
+													{/each}
+												{/if}
+												{#if s.external.length > 0}
+													<p class="suggestions-heading">Nearby discoveries</p>
+													{#each s.external as sug}
+														<div class="suggestion-row">
+															<span class="grow"
+																>{sug.name}<span class="muted">
+																	— {formatKm(sug.distance_km)} from route{#if sug.vicinity}
+																		— {sug.vicinity}{/if}</span
+																></span
+															>
+															<button
+																class="btn small"
+																type="button"
+																onclick={() => addSuggestionAsStop(plan.id, sug)}>Add</button
+															>
+														</div>
+													{/each}
+												{/if}
 											</div>
-											{#if stop.notes}<div class="meta dayplan-stop-note">{stop.notes}</div>{/if}
-											{#if stop.ai_notes}<div class="ai-note">{stop.ai_notes}</div>{/if}
-											{#if !isViewer}
-												<form
-													method="POST"
-													action="?/dayplan-stop-notes"
-													use:enhance={() => {
-														return async ({ update }) => {
-															await update({ reset: false });
-														};
-													}}
-													class="dayplan-note-form"
-												>
-													<input type="hidden" name="id" value={stop.id} />
-													<input name="notes" value={stop.notes ?? ''} placeholder="Stop note" />
-													<button class="btn small" type="submit">Save</button>
-												</form>
-											{/if}
-										</li>
-									{/each}
-								</ol>
-							{/if}
-
-							{#if legLinks}
-								<div class="leg-links">
-									{#each legLinks as leg, i}
-										<a class="chip-link route" href={leg.url} target="_blank" rel="noopener">
-											Leg {i + 1}: {leg.from} to {leg.to}
-										</a>
-									{/each}
-								</div>
-							{/if}
-
-							{#if !isViewer}
-								<div class="dayplan-ai-tools">
-									<button
-										class="btn small"
-										type="button"
-										disabled={aiNotesBusy === plan.id || stops.length === 0}
-										onclick={() => fetchAiNotes(plan.id)}
-									>
-										{aiNotesBusy === plan.id ? 'Generating...' : 'Get visit notes'}
-									</button>
-									<button
-										class="btn small"
-										type="button"
-										disabled={suggestBusy === plan.id || !canSuggestStops(stops)}
-										onclick={() => fetchSuggestions(plan.id)}
-									>
-										{suggestBusy === plan.id ? 'Loading...' : 'Suggest stops'}
-									</button>
-								</div>
-								{#if aiNotesError[plan.id]}
-									<p class="field-error">{aiNotesError[plan.id]}</p>
-								{/if}
-								{#if suggestions[plan.id]}
-									{@const s = suggestions[plan.id]}
-									{#if s.internal.length > 0 || s.external.length > 0}
-										<div class="suggestions-panel">
-											{#if s.internal.length > 0}
-												<p class="suggestions-heading">From your itinerary</p>
-												{#each s.internal as sug}
-													<div class="suggestion-row">
-														<span class="grow"
-															>{sug.name}<span class="muted">
-																— {formatKm(sug.distance_km)} from route{#if sug.vicinity}
-																	— {sug.vicinity}{/if}</span
-															></span
-														>
-														<button
-															class="btn small"
-															type="button"
-															onclick={() => addSuggestionAsStop(plan.id, sug)}>Add</button
-														>
-													</div>
-												{/each}
-											{/if}
-											{#if s.external.length > 0}
-												<p class="suggestions-heading">Nearby discoveries</p>
-												{#each s.external as sug}
-													<div class="suggestion-row">
-														<span class="grow"
-															>{sug.name}<span class="muted">
-																— {formatKm(sug.distance_km)} from route{#if sug.vicinity}
-																	— {sug.vicinity}{/if}</span
-															></span
-														>
-														<button
-															class="btn small"
-															type="button"
-															onclick={() => addSuggestionAsStop(plan.id, sug)}>Add</button
-														>
-													</div>
-												{/each}
-											{/if}
-										</div>
-									{:else}
-										<p class="muted">No suggestions found nearby.</p>
+										{:else}
+											<p class="muted">No suggestions found nearby.</p>
+										{/if}
 									{/if}
 								{/if}
+							</div>
+						</details>
 
+						{#if !isViewer}
 								<details class="edit">
 									<summary>edit plan</summary>
 									<form method="POST" action="?/dayplan-edit" use:enhance class="edit-form">
@@ -1584,8 +1638,7 @@
 									<input name="notes" placeholder="Stop note" />
 									<button class="btn small" type="submit">Add stop</button>
 								</form>
-							{/if}
-						</details>
+						{/if}
 					</article>
 				{/each}
 			</div>
@@ -1596,135 +1649,154 @@
 				method="POST"
 				action="?/dayplan-create"
 				class="dayplan-builder"
-				use:enhance={() => {
+				use:enhance={({ formData }) => {
+					formData.set('title', dayPlanTitle.trim());
+					formData.set('optional_date', dayPlanDate);
+					formData.set('notes', dayPlanNotes);
+					formData.set('stops', builderStopsJson);
 					return async ({ result, update }) => {
+						await update({ reset: false });
 						if (result.type === 'success') {
 							resetDayPlanBuilder();
 							dayPlanBuilderOpen = false;
 						}
-						await update();
 					};
 				}}
 			>
 				<input type="hidden" name="stops" value={builderStopsJson} />
-				<div class="form-row">
-					<input name="title" placeholder="Title (required)" required bind:value={dayPlanTitle} />
-					<input name="optional_date" type="date" bind:value={dayPlanDate} />
-				</div>
-				<textarea name="notes" rows="2" placeholder="Plan notes" bind:value={dayPlanNotes}
-				></textarea>
-
-				<div class="dayplan-picker">
-					<input
-						type="search"
-						placeholder="Filter places…"
-						bind:value={dayPlanSearch}
-						class="dayplan-search"
-					/>
-					<select bind:value={dayPlanAddPlaceId} aria-label="place">
-						<option value="">Choose a place...</option>
-						{#each dayPlanPlacesFiltered as { node, depth } (node.id)}
-							<option
-								value={String(node.id)}
-								disabled={dayPlanStops.some((s) => s.itinerary_item_id === node.id)}
-							>
-								{'· '.repeat(depth)}{node.title}
-							</option>
-						{/each}
-					</select>
-					<button
-						class="btn small"
-						type="button"
-						onclick={addSelectedBuilderPlace}
-						disabled={!dayPlanAddPlaceId}
-					>
-						Add place
-					</button>
-				</div>
-				{#if dayPlanParents.length > 0}
-					<div class="quick-groups">
-						{#each dayPlanParents as { node } (node.id)}
-							{#if directChildPlaces(node.id).length > 0}
-								<button
-									class="chip-action"
-									type="button"
-									onclick={() => startDayPlanFromParent(node)}
-								>
-									{node.title}
-								</button>
-							{/if}
-						{/each}
+				<div class="builder-step">
+					<div class="builder-step-label">1. Name your day</div>
+					<div class="form-row">
+						<input name="title" placeholder="Title (required)" required bind:value={dayPlanTitle} />
+						<input name="optional_date" type="date" bind:value={dayPlanDate} />
 					</div>
-				{/if}
+					<textarea name="notes" rows="2" placeholder="Plan notes (optional)" bind:value={dayPlanNotes}
+					></textarea>
+				</div>
 
-				{#if dayPlanStops.length > 0}
-					<div class="route-tools">
-						<select bind:value={builderAnchor} aria-label="route anchor">
-							{#each anchorOptions(dayPlanDate || null) as anchor (anchor.value)}
-								<option value={anchor.value}>{anchor.label}</option>
+				<div class="builder-step">
+					<div class="builder-step-label">2. Add stops</div>
+					{#if dayPlanParents.length > 0}
+						<p class="builder-hint">Load an entire group at once:</p>
+						<div class="quick-groups">
+							{#each dayPlanParents as { node } (node.id)}
+								{#if directChildPlaces(node.id).length > 0}
+									<button
+										class="chip-action group-chip"
+										type="button"
+										onclick={() => startDayPlanFromParent(node)}
+									>
+										{node.title}
+									</button>
+								{/if}
+							{/each}
+						</div>
+						<p class="builder-hint">Or pick individual places:</p>
+					{/if}
+					<div class="dayplan-picker">
+						<input
+							type="search"
+							placeholder="Type to filter the dropdown below…"
+							bind:value={dayPlanSearch}
+							class="dayplan-search"
+						/>
+						<select bind:value={dayPlanAddPlaceId} aria-label="place">
+							<option value="">Choose a place...</option>
+							{#each dayPlanPlacesFiltered as { node, depth } (node.id)}
+								<option
+									value={String(node.id)}
+									disabled={dayPlanStops.some((s) => s.itinerary_item_id === node.id)}
+								>
+									{'· '.repeat(depth)}{node.title}
+								</option>
 							{/each}
 						</select>
 						<button
-							class="btn small primary"
+							class="btn small"
 							type="button"
-							disabled={!canOptimizeRoute(builderRouteStops()) || dayPlanRouteBusy === 'builder'}
-							onclick={optimizeBuilderStops}
+							onclick={addSelectedBuilderPlace}
+							disabled={!dayPlanAddPlaceId}
 						>
-							{dayPlanRouteBusy === 'builder' ? 'Working...' : 'Optimize order'}
+							Add place
 						</button>
-						{#if builderRouteSummary}
-							<span class="route-status">Total: {builderRouteSummary}</span>
-						{/if}
 					</div>
-					<ol class="builder-stops">
-						{#each dayPlanStops as stop, i (stop.itinerary_item_id)}
-							<li>
-								<span class="ttl">{stop.title}</span>
-								<input bind:value={stop.notes} placeholder="Stop note" />
-								<div class="builder-controls">
-									<button
-										type="button"
-										title="move up"
-										disabled={i === 0}
-										onclick={() => moveBuilderStop(i, -1)}>↑</button
-									>
-									<button
-										type="button"
-										title="move down"
-										disabled={i === dayPlanStops.length - 1}
-										onclick={() => moveBuilderStop(i, 1)}>↓</button
-									>
-									<button type="button" class="del" onclick={() => removeBuilderStop(i)}
-										>Remove</button
-									>
-								</div>
-							</li>
-						{/each}
-					</ol>
-					<div class="dayplan-preview">
-						<span>{dayPlanStops.length} stop{dayPlanStops.length === 1 ? '' : 's'}</span>
-						{#if builderDistance}<span>~{builderDistance} straight-line</span>{/if}
-						{#if builderRoute}
-							<a class="chip-link route" href={builderRoute} target="_blank" rel="noopener"
-								>Open as one route</a
+				</div>
+
+				{#if dayPlanStops.length > 0}
+					<div class="builder-step">
+						<div class="builder-step-label">3. Review &amp; reorder</div>
+						<div class="route-tools">
+							<select bind:value={builderAnchor} aria-label="route anchor">
+								{#each anchorOptions(dayPlanDate || null) as anchor (anchor.value)}
+									<option value={anchor.value}>{anchor.label}</option>
+								{/each}
+							</select>
+							<button
+								class="btn small primary"
+								type="button"
+								disabled={!canOptimizeRoute(builderRouteStops()) || dayPlanRouteBusy === 'builder'}
+								onclick={optimizeBuilderStops}
 							>
-						{/if}
-						{#if builderLegs}
-							{#each builderLegs as leg, i}
-								<a class="chip-link" href={leg.url} target="_blank" rel="noopener">
-									Leg {i + 1}
-								</a>
+								{dayPlanRouteBusy === 'builder' ? 'Working...' : 'Optimize order'}
+							</button>
+							{#if builderRouteSummary}
+								<span class="route-status">Total: {builderRouteSummary}</span>
+							{/if}
+						</div>
+						<ol class="builder-stops">
+							{#each dayPlanStops as stop, i (stop.itinerary_item_id)}
+								<li>
+									<span class="ttl">{stop.title}</span>
+									<input bind:value={stop.notes} placeholder="Stop note" />
+									<div class="builder-controls">
+										<button
+											type="button"
+											title="move up"
+											disabled={i === 0}
+											onclick={() => moveBuilderStop(i, -1)}>↑</button
+										>
+										<button
+											type="button"
+											title="move down"
+											disabled={i === dayPlanStops.length - 1}
+											onclick={() => moveBuilderStop(i, 1)}>↓</button
+										>
+										<button type="button" class="del" onclick={() => removeBuilderStop(i)}
+											>Remove</button
+										>
+									</div>
+								</li>
 							{/each}
-						{/if}
+						</ol>
+						<div class="dayplan-preview">
+							<span>{dayPlanStops.length} stop{dayPlanStops.length === 1 ? '' : 's'}</span>
+							{#if builderDistance}<span>~{builderDistance} straight-line</span>{/if}
+							{#if builderRoute}
+								<a class="chip-link route" href={builderRoute} target="_blank" rel="noopener"
+									>Open as one route</a
+								>
+							{/if}
+							{#if builderLegs}
+								{#each builderLegs as leg, i}
+									<a class="chip-link" href={leg.url} target="_blank" rel="noopener">
+										Leg {i + 1}
+									</a>
+								{/each}
+							{/if}
+						</div>
 					</div>
 				{/if}
 				<div class="cand-actions">
 					<button
-						class="btn small primary"
+						class="btn small primary save-day-btn"
 						type="submit"
 						disabled={!dayPlanTitle.trim() || dayPlanStops.length === 0}
 					>
-						Save day
+						Save day{#if !dayPlanTitle.trim() || dayPlanStops.length === 0}
+							<span class="save-hint">
+								{#if !dayPlanTitle.trim()}(needs title){:else}(add stops first){/if}
+							</span>
+						{/if}
 					</button>
 					<button
 						class="btn small"
@@ -3437,8 +3509,7 @@
 		border: 0;
 	}
 	.edit summary,
-	.paste summary,
-	.dayplan-details summary {
+	.paste summary {
 		cursor: pointer;
 		color: var(--link);
 		font-size: 0.8rem;
@@ -3642,6 +3713,15 @@
 	.dayplan-details {
 		margin-top: 8px;
 	}
+	.dayplan-details > summary {
+		cursor: pointer;
+		color: var(--link);
+		font-size: 0.85rem;
+		font-weight: 600;
+	}
+	.dayplan-stops-section {
+		margin-top: 8px;
+	}
 	.dayplan-stops,
 	.builder-stops {
 		margin: 8px 0 0 1.4rem;
@@ -3732,10 +3812,85 @@
 		font-size: 0.78rem;
 		margin: 4px 0 4px 30px;
 	}
+	.dayplan-help {
+		margin-bottom: 12px;
+		font-size: 0.9rem;
+	}
+	.dayplan-help > summary {
+		cursor: pointer;
+		color: var(--link);
+		font-size: 0.85rem;
+		font-weight: 600;
+	}
+	.dayplan-help-body {
+		margin-top: 6px;
+		display: grid;
+		gap: 2px;
+	}
+	.dayplan-help-body details {
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 0;
+	}
+	.dayplan-help-body details[open] {
+		padding-bottom: 8px;
+	}
+	.dayplan-help-body summary {
+		cursor: pointer;
+		padding: 8px 10px;
+		font-weight: 600;
+		font-size: 0.85rem;
+	}
+	.dayplan-help-body ol {
+		margin: 0 10px 0 28px;
+		padding: 0;
+		font-size: 0.85rem;
+		line-height: 1.5;
+	}
+	.dayplan-help-body li {
+		margin-bottom: 2px;
+	}
+	.dayplan-stops-section {
+		margin-top: 8px;
+	}
+	.builder-step {
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		padding: 10px 12px;
+		margin: 0;
+	}
+	.builder-step-label {
+		font-weight: 600;
+		font-size: 0.85rem;
+		color: var(--fg);
+		margin-bottom: 6px;
+	}
+	.builder-hint {
+		font-size: 0.8rem;
+		color: var(--muted);
+		margin: 4px 0 2px;
+	}
+	.group-chip {
+		background: var(--accent-soft, #e8f0fe);
+		border-color: var(--link);
+		font-weight: 600;
+		font-size: 0.82rem;
+	}
+	.save-day-btn {
+		font-size: 1rem;
+		padding: 8px 20px;
+		min-height: 44px;
+	}
+	.save-hint {
+		font-weight: 400;
+		font-size: 0.78rem;
+		opacity: 0.8;
+		margin-left: 4px;
+	}
 	.dayplan-builder {
 		display: grid;
-		gap: 8px;
-		border: 1px solid var(--border);
+		gap: 10px;
+		border: 2px solid var(--link);
 		border-radius: 8px;
 		padding: 12px;
 		margin-top: 12px;
@@ -4161,10 +4316,10 @@
 			padding: 0;
 			break-inside: avoid;
 		}
-		.dayplan-details {
+		.dayplan-stops-section {
 			display: block;
 		}
-		.dayplan-details summary {
+		.dayplan-help {
 			display: none;
 		}
 		.dayplan-stops li {

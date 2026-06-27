@@ -14,9 +14,9 @@ describe('googleMapsLink', () => {
 		expect(u).toContain('query_place_id=CHIJabc');
 		expect(u).toContain('query=Palais%20des%20Papes');
 	});
-	it('uses a name search even when coordinates exist', () => {
+	it('uses coordinates when present, even with a name', () => {
 		expect(googleMapsLink({ name: 'Arborvine', lat: 44.4115, lon: -68.5924 })).toContain(
-			'query=Arborvine'
+			'query=44.4115%2C-68.5924'
 		);
 	});
 	it('uses coordinates only when no name exists', () => {

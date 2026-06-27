@@ -41,7 +41,7 @@
 		);
 	}
 
-	async function reverseGeocode(lat: number, lng: number): Promise<string> {
+	async function reverseGeocode(lat: number, lng: number): Promise<PickedLocation> {
 		try {
 			const res = await fetch('/api/geocode', {
 				method: 'POST',
@@ -50,15 +50,20 @@
 			});
 			if (res.ok) {
 				const data = await res.json();
-				return data.name ?? `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+				return {
+					lat,
+					lng,
+					label: data.name ?? `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+					place_id: data.place_id ?? null
+				};
 			}
 		} catch {
 			/* fall through to coordinate label */
 		}
-		return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+		return { lat, lng, label: `${lat.toFixed(4)}, ${lng.toFixed(4)}`, place_id: null };
 	}
 
-	function placeMarker(lat: number, lng: number, label: string) {
+	function placeMarker(lat: number, lng: number, label: string, placeId: string | null = null) {
 		const pos = { lat, lng };
 		if (!marker) {
 			marker = new markerLib.AdvancedMarkerElement({ map, position: pos, gmpDraggable: true });
@@ -66,14 +71,14 @@
 				const p = marker.position;
 				const dLat = typeof p.lat === 'function' ? p.lat() : p.lat;
 				const dLng = typeof p.lng === 'function' ? p.lng() : p.lng;
-				const name = await reverseGeocode(dLat, dLng);
-				selected = { lat: dLat, lng: dLng, label: name };
-				status = name;
+				const location = await reverseGeocode(dLat, dLng);
+				selected = location;
+				status = location.label;
 			});
 		} else {
 			marker.position = pos;
 		}
-		selected = { lat, lng, label };
+		selected = { lat, lng, label, place_id: placeId };
 		status = label;
 	}
 
@@ -100,7 +105,7 @@
 				map.setCenter({ lat: data.lat, lng: data.lng });
 				map.setZoom(13);
 			}
-			placeMarker(data.lat, data.lng, data.name);
+			placeMarker(data.lat, data.lng, data.name, data.place_id ?? null);
 		} finally {
 			searching = false;
 		}
@@ -138,8 +143,8 @@
 				const lat = ev.latLng.lat();
 				const lng = ev.latLng.lng();
 				placeMarker(lat, lng, `${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-				const name = await reverseGeocode(lat, lng);
-				if (selected) placeMarker(lat, lng, name);
+				const location = await reverseGeocode(lat, lng);
+				placeMarker(location.lat, location.lng, location.label, location.place_id);
 			});
 
 			if (hasInitial) {

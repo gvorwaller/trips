@@ -33,6 +33,11 @@ export const actions: Actions = {
 			return fail(400, { error: 'Pick a location on the map first.' });
 		}
 		const placeId = (form.get('place_id') ?? '').toString().trim() || null;
+		if (!placeId) {
+			return fail(400, {
+				error: 'Google did not return a place ID for that selection. Search and select the place again.'
+			});
+		}
 		await setLocation(tripId, parseId(params.itemId), lat, lon, placeId);
 		throw redirect(303, `/trips/${tripId}`);
 	},

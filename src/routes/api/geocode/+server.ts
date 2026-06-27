@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { geocodeConfigured, geocodePlace, reverseGeocode } from '$server/geocode';
+import { geocodeConfigured, geocodePlace, reverseGeocodeLocation } from '$server/geocode';
 
 /**
  * Forward + reverse geocoding. POST { query } → place; POST { lat, lng } →
@@ -31,8 +31,16 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json(r);
 	}
 	if (Number.isFinite(lat) && Number.isFinite(lng)) {
-		const name = await reverseGeocode(lat, lng);
-		return json({ lat, lng, name: name ?? `${lat.toFixed(4)}, ${lng.toFixed(4)}`, bounds: null });
+		const r = await reverseGeocodeLocation(lat, lng);
+		return json(
+			r ?? {
+				lat,
+				lng,
+				name: `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+				place_id: null,
+				bounds: null
+			}
+		);
 	}
 	return json({ error: 'Provide a search query or lat/lng.' }, { status: 400 });
 };

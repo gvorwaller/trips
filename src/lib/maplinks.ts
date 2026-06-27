@@ -29,11 +29,14 @@ function searchToken(p: MapPlace): string {
 	return p.name || (hasCoords(p) ? coordStr(p) : 'place');
 }
 
-/** "View on Google Maps" — prefers place_id, then a named place search, then coordinates. */
+/** "View on Google Maps" — prefers place_id, then coords (with name label), then name search. */
 export function googleMapsLink(p: MapPlace): string {
 	const base = 'https://www.google.com/maps/search/?api=1';
 	if (p.place_id) {
 		return `${base}&query=${encodeURIComponent(p.name || 'place')}&query_place_id=${encodeURIComponent(p.place_id)}`;
+	}
+	if (hasCoords(p)) {
+		return `${base}&query=${encodeURIComponent(coordStr(p))}`;
 	}
 	return `${base}&query=${encodeURIComponent(searchToken(p))}`;
 }

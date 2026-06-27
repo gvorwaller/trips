@@ -21,6 +21,7 @@ export interface ExtractedItineraryItem {
 	location_query: string | null;
 	lat: number | null;
 	lon: number | null;
+	place_id: string | null;
 	children: ExtractedItineraryItem[];
 }
 
@@ -240,6 +241,7 @@ function normalizeItem(raw: unknown, depth: number, count: { n: number }): Extra
 		location_query: cleanString(obj.location_query, 500),
 		lat: cleanNumber(obj.lat, -90, 90),
 		lon: cleanNumber(obj.lon, -180, 180),
+		place_id: null,
 		children
 	};
 }
@@ -308,6 +310,7 @@ export async function extractItineraryFromGoogleMapsUrl(
 	if (!parsed) return null;
 
 	let { lat, lng, name } = parsed;
+	let placeId: string | null = null;
 
 	// If URL didn't contain coordinates, geocode the query
 	if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
@@ -319,8 +322,12 @@ export async function extractItineraryFromGoogleMapsUrl(
 		if (geo) {
 			lat = geo.lat;
 			lng = geo.lng;
+			placeId = geo.place_id;
 			if (!name) name = geo.name;
 		}
+	} else if (name) {
+		const geo = await geocodePlace(name, { lat, lng, radiusM: 750 });
+		placeId = geo?.place_id ?? null;
 	}
 
 	const title = name || 'Unnamed place';
@@ -334,6 +341,7 @@ export async function extractItineraryFromGoogleMapsUrl(
 		location_query: name,
 		lat: Number.isFinite(lat) ? lat : null,
 		lon: Number.isFinite(lng) ? lng : null,
+		place_id: placeId,
 		children: []
 	};
 	return [item];

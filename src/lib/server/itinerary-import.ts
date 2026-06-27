@@ -17,6 +17,7 @@ export interface ItineraryImportCandidate {
 	location_query?: string | null;
 	lat?: number | null;
 	lon?: number | null;
+	place_id?: string | null;
 	children?: ItineraryImportCandidate[];
 }
 
@@ -122,7 +123,7 @@ async function prepareItem(
 	let notes = cleanString(raw.notes, 2000);
 	let lat = cleanNumber(raw.lat, -90, 90);
 	let lon = cleanNumber(raw.lon, -180, 180);
-	let placeId: string | null = null;
+	let placeId = cleanString(raw.place_id, 300);
 
 	if (item_type === 'place' && options.geocode && (lat === null || lon === null)) {
 		const q = locationQuery ?? address ?? [title, options.tripName].filter(Boolean).join(', ');
@@ -130,10 +131,14 @@ async function prepareItem(
 		if (geo) {
 			lat = geo.lat;
 			lon = geo.lng;
-			placeId = null;
+			placeId = geo.place_id;
 		} else {
 			notes = joinNotes(notes, locationHint(address, locationQuery));
 		}
+	} else if (item_type === 'place' && options.geocode && !placeId && lat !== null && lon !== null) {
+		const q = locationQuery ?? address ?? [title, options.tripName].filter(Boolean).join(', ');
+		const geo = await geocodePlace(q, { lat, lng: lon, radiusM: 750 });
+		placeId = geo?.place_id ?? null;
 	} else if (item_type === 'place' && lat === null && lon === null) {
 		notes = joinNotes(notes, locationHint(address, locationQuery));
 	}
