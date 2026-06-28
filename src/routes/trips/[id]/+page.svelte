@@ -922,6 +922,8 @@
 	}
 
 	function selectPin(id: number) {
+		placesSearch = '';
+		flushSync();
 		selectedPin = id;
 		document.getElementById(`itin-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 	}
@@ -1029,6 +1031,47 @@
 		return s;
 	}
 
+	let placesSearch = $state('');
+	const placesQuery = $derived(placesSearch.trim().toLowerCase());
+
+	function itinerarySearchText(node: PageData['itineraryRows'][number]['node']): string {
+		return [
+			node.item_type,
+			node.title,
+			node.notes,
+			node.external_url,
+			node.date,
+			node.lat,
+			node.lon
+		]
+			.filter((v) => v != null && String(v).trim() !== '')
+			.join(' ')
+			.toLowerCase();
+	}
+
+	const placesDirectMatchIds = $derived.by(() => {
+		const matches = new Set<number>();
+		if (!placesQuery) return matches;
+		for (const { node } of data.itineraryRows) {
+			if (itinerarySearchText(node).includes(placesQuery)) matches.add(node.id);
+		}
+		return matches;
+	});
+
+	const placesVisibleIds = $derived.by(() => {
+		if (!placesQuery) return new Set<number>();
+		const rowsById = new Map(data.itineraryRows.map((row) => [row.node.id, row]));
+		const visible = new Set<number>();
+		for (const id of placesDirectMatchIds) {
+			let row = rowsById.get(id);
+			while (row) {
+				visible.add(row.node.id);
+				row = row.node.parent_id == null ? undefined : rowsById.get(row.node.parent_id);
+			}
+		}
+		return visible;
+	});
+
 	// Per-row roll-up of descendant LEAF checked-state (td-b60112). For each node
 	// returns {leaves, checked}: a leaf counts as itself; a parent sums its
 	// descendants. A checkbox is then derived — all leaves checked → checked,
@@ -1074,6 +1117,10 @@
 
 	const itinHidden = $derived(hiddenIds(data.itineraryRows, itinCollapsed));
 	const itinParents = $derived(parentIds(data.itineraryRows));
+	const placesVisibleRows = $derived.by(() => {
+		if (placesQuery) return data.itineraryRows.filter(({ node }) => placesVisibleIds.has(node.id));
+		return data.itineraryRows.filter(({ node }) => !itinHidden.has(node.id));
+	});
 
 	function toggled(set: Set<number>, key: string, id: number): Set<number> {
 		const next = new Set(set);
@@ -1829,16 +1876,46 @@
 		{#if data.itineraryRows.length === 0}
 			<p class="muted">No places yet.</p>
 		{:else}
+			<div class="places-searchbar">
+				<label class="sr-only" for="places-search">Search places</label>
+				<input
+					id="places-search"
+					class="places-search-input"
+					type="search"
+					bind:value={placesSearch}
+					placeholder="Search places..."
+					autocomplete="off"
+					spellcheck="false"
+					aria-describedby="places-search-count"
+				/>
+				{#if placesSearch}
+					<button class="btn small places-search-clear" type="button" onclick={() => (placesSearch = '')}
+						>Clear</button
+					>
+				{/if}
+				<span id="places-search-count" class="places-search-count">
+					{#if placesQuery}
+						{placesDirectMatchIds.size} match{placesDirectMatchIds.size === 1 ? '' : 'es'}
+					{:else}
+						{data.itineraryRows.length} items
+					{/if}
+				</span>
+			</div>
 			{#if itinParents.size > 0}
 				<div class="tree-tools">
 					<button type="button" class="linkbtn" onclick={collapseAllItin}>Collapse all</button>
 					<span class="sep" aria-hidden="true">·</span>
 					<button type="button" class="linkbtn" onclick={expandAllItin}>Expand all</button>
+					{#if placesQuery}
+						<span class="muted">Matches include parent groups</span>
+					{/if}
 				</div>
 			{/if}
-			<ul class="outline">
-				{#each data.itineraryRows as { node, depth } (node.id)}
-					{#if !itinHidden.has(node.id)}
+			{#if placesVisibleRows.length === 0}
+				<p class="muted places-empty">No places match "{placesSearch.trim()}".</p>
+			{:else}
+				<ul class="outline">
+					{#each placesVisibleRows as { node, depth } (node.id)}
 						{@const route =
 							node.item_type === 'day' || node.item_type === 'section'
 								? dayDirections(node.id)
@@ -1847,6 +1924,7 @@
 							id="itin-{node.id}"
 							style="padding-left: {depth * 22}px"
 							class:flash={selectedPin === node.id}
+							class:search-match={!!placesQuery && placesDirectMatchIds.has(node.id)}
 						>
 							<div class="line">
 								{#if itinParents.has(node.id)}
@@ -1973,9 +2051,9 @@
 								</details>
 							{/if}
 						</li>
-					{/if}
-				{/each}
-			</ul>
+					{/each}
+				</ul>
+			{/if}
 		{/if}
 
 		{#if !isViewer}
@@ -3291,12 +3369,58 @@
 	.tree-tools {
 		display: flex;
 		align-items: center;
+		flex-wrap: wrap;
 		gap: 8px;
 		margin: 4px 0;
 		font-size: 0.85rem;
 	}
 	.tree-tools .sep {
 		color: var(--muted);
+	}
+	.places-searchbar {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 10px 0 6px;
+	}
+	.places-search-input {
+		flex: 1;
+		min-width: 0;
+		font-size: 16px;
+		padding: 9px 11px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--card);
+		color: var(--text);
+	}
+	.places-search-count {
+		flex-shrink: 0;
+		color: var(--muted);
+		font-size: 0.82rem;
+	}
+	.places-search-clear {
+		flex-shrink: 0;
+	}
+	@media (max-width: 480px) {
+		.places-searchbar {
+			flex-wrap: wrap;
+		}
+		.places-search-input {
+			flex-basis: 100%;
+		}
+		.places-search-count {
+			margin-left: auto;
+		}
+	}
+	.places-empty {
+		margin: 10px 0 4px;
+	}
+	li.search-match {
+		background: var(--accent-soft);
+	}
+	li.search-match .line {
+		padding-left: 6px;
+		padding-right: 6px;
 	}
 	.linkbtn {
 		background: none;
