@@ -14,6 +14,17 @@ export function formatKm(km: number): string {
 	return km < 10 ? `${km.toFixed(1)} km` : `${Math.round(km)} km`;
 }
 
+export type DistanceUnit = 'mi' | 'km';
+
+export function formatMiles(km: number): string {
+	const miles = km * 0.621371;
+	return miles < 10 ? `${miles.toFixed(1)} mi` : `${Math.round(miles)} mi`;
+}
+
+export function formatDistance(km: number, unit: DistanceUnit = 'mi'): string {
+	return unit === 'km' ? formatKm(km) : formatMiles(km);
+}
+
 export function formatDuration(min: number): string {
 	if (min < 60) return `${min} min`;
 	const h = Math.floor(min / 60);

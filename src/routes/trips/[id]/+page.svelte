@@ -16,7 +16,7 @@
 		dayPlanDirectionsLink,
 		type MapPlace
 	} from '$lib/maplinks';
-	import { haversineKm, formatKm, formatDuration } from '$lib/geo';
+	import { haversineKm, formatDistance, formatDuration, type DistanceUnit } from '$lib/geo';
 	import {
 		computeLegDistances,
 		optimizeDrivingRoute,
@@ -410,7 +410,9 @@
 	let dayPlanRouteStatus = $state<Record<number, string>>({});
 	let savedPlanAnchors = $state<Record<number, string>>({});
 	let builderAnchor = $state('none');
-	let builderRouteSummary = $state('');
+	let builderRouteKm = $state<number | null>(null);
+	let builderRouteMin = $state<number | null>(null);
+	let distanceUnit = $state<DistanceUnit>('mi');
 
 	let aiNotesBusy = $state<number | null>(null);
 	let aiNotesError = $state<Record<number, string>>({});
@@ -548,7 +550,7 @@
 		return `${visited}/${stops.length} visited`;
 	}
 
-	function routeDistance(places: MapPlace[]): string | null {
+	function routeDistanceKm(places: MapPlace[]): number | null {
 		let km = 0;
 		let legs = 0;
 		for (let i = 0; i < places.length - 1; i++) {
@@ -564,7 +566,16 @@
 				legs += 1;
 			}
 		}
-		return legs > 0 ? formatKm(km) : null;
+		return legs > 0 ? km : null;
+	}
+
+	function fmtDistance(km: number): string {
+		return formatDistance(km, distanceUnit);
+	}
+
+	function routeDistance(places: MapPlace[]): string | null {
+		const km = routeDistanceKm(places);
+		return km == null ? null : fmtDistance(km);
 	}
 
 	function savedRouteStops(stops: DayPlanStop[]): RouteStop[] {
@@ -615,7 +626,7 @@
 		}
 		const km = legs.reduce((sum, s) => sum + (s.drive_km ?? 0), 0);
 		const min = legs.reduce((sum, s) => sum + (s.drive_min ?? 0), 0);
-		return `${formatKm(km)}, ${formatDuration(min)}`;
+		return `${fmtDistance(km)}, ${formatDuration(min)}`;
 	}
 
 	function routeSummary(stops: DayPlanStop[]): string | null {
@@ -627,7 +638,7 @@
 
 	function legSummary(prev: DayPlanStop | null, stop: DayPlanStop): string | null {
 		if (stop.drive_km != null && stop.drive_min != null) {
-			return `${formatKm(stop.drive_km)}, ${formatDuration(stop.drive_min)}`;
+			return `${fmtDistance(stop.drive_km)}, ${formatDuration(stop.drive_min)}`;
 		}
 		if (
 			prev &&
@@ -636,7 +647,7 @@
 			typeof stop.snapshot_lat === 'number' &&
 			typeof stop.snapshot_lon === 'number'
 		) {
-			return `~${formatKm(
+			return `~${fmtDistance(
 				haversineKm(prev.snapshot_lat, prev.snapshot_lon, stop.snapshot_lat, stop.snapshot_lon)
 			)} straight-line`;
 		}
@@ -763,16 +774,19 @@
 			if (MAPS_API_KEY) {
 				const optimized = await optimizeDrivingRoute(MAPS_API_KEY, { anchor, stops: routeStops });
 				orderedIds = optimized.orderedIds;
-				builderRouteSummary = `${formatKm(optimized.totalKm)}, ${formatDuration(optimized.totalMin)}`;
+				builderRouteKm = optimized.totalKm;
+				builderRouteMin = optimized.totalMin;
 			} else {
 				orderedIds = straightLineOptimize(routeStops, anchor);
-				builderRouteSummary = routeDistance(orderBuilderStops(orderedIds).map(stopPlace)) ?? '';
+				builderRouteKm = routeDistanceKm(orderBuilderStops(orderedIds).map(stopPlace));
+				builderRouteMin = null;
 			}
 			dayPlanStops = orderBuilderStops(orderedIds);
 		} catch {
 			const orderedIds = straightLineOptimize(routeStops, anchor);
 			dayPlanStops = orderBuilderStops(orderedIds);
-			builderRouteSummary = routeDistance(dayPlanStops.map(stopPlace)) ?? '';
+			builderRouteKm = routeDistanceKm(dayPlanStops.map(stopPlace));
+			builderRouteMin = null;
 		} finally {
 			dayPlanRouteBusy = null;
 		}
@@ -851,6 +865,13 @@
 	const builderRoute = $derived(googleDayDirectionsLink(dayPlanStops.map(stopPlace)));
 	const builderLegs = $derived(googleLegByLegLinks(dayPlanStops.map(stopPlace)));
 	const builderDistance = $derived(routeDistance(dayPlanStops.map(stopPlace)));
+	const builderRouteSummary = $derived(
+		builderRouteKm == null
+			? ''
+			: builderRouteMin == null
+				? fmtDistance(builderRouteKm)
+				: `${fmtDistance(builderRouteKm)}, ${formatDuration(builderRouteMin)}`
+	);
 	const builderStopsJson = $derived(
 		JSON.stringify(
 			dayPlanStops.map((s) => ({
@@ -868,7 +889,8 @@
 		dayPlanAddPlaceId = '';
 		dayPlanSearch = '';
 		builderAnchor = 'none';
-		builderRouteSummary = '';
+		builderRouteKm = null;
+		builderRouteMin = null;
 	}
 
 	function openDayPlanBuilder() {
@@ -890,7 +912,8 @@
 				apple_maps_place_id: row.node.apple_maps_place_id
 			}
 		];
-		builderRouteSummary = '';
+		builderRouteKm = null;
+		builderRouteMin = null;
 	}
 
 	function addSelectedBuilderPlace() {
@@ -916,12 +939,14 @@
 		const next = [...dayPlanStops];
 		[next[index], next[target]] = [next[target], next[index]];
 		dayPlanStops = next;
-		builderRouteSummary = '';
+		builderRouteKm = null;
+		builderRouteMin = null;
 	}
 
 	function removeBuilderStop(index: number) {
 		dayPlanStops = dayPlanStops.filter((_, i) => i !== index);
-		builderRouteSummary = '';
+		builderRouteKm = null;
+		builderRouteMin = null;
 	}
 
 	async function toggleVisited(id: number, visited: boolean) {
@@ -998,6 +1023,7 @@
 	// mutation — so viewers can fold freely without tripping the write guard.
 	const itinKey = $derived(`trips:${data.trip.id}:itinCollapsed`);
 	const packKey = $derived(`trips:${data.trip.id}:packCollapsed`);
+	const distanceUnitKey = $derived(`trips:${data.trip.id}:distanceUnit`);
 
 	let itinCollapsed = $state<Set<number>>(new Set());
 	let packCollapsed = $state<Set<number>>(new Set());
@@ -1006,7 +1032,14 @@
 		localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone ?? '';
 		itinCollapsed = loadIds(itinKey);
 		packCollapsed = loadIds(packKey);
+		const savedUnit = localStorage.getItem(distanceUnitKey);
+		if (savedUnit === 'km' || savedUnit === 'mi') distanceUnit = savedUnit;
 	});
+
+	function setDistanceUnit(unit: DistanceUnit) {
+		distanceUnit = unit;
+		if (browser) localStorage.setItem(distanceUnitKey, unit);
+	}
 
 	function loadIds(key: string): Set<number> {
 		if (!browser) return new Set();
@@ -1348,6 +1381,20 @@
 			<h2>Day Plans</h2>
 			<span class="count-badge">{data.dayPlans.length}</span>
 		</button>
+		<div class="unit-toggle" aria-label="distance units">
+			<button
+				type="button"
+				class:active={distanceUnit === 'mi'}
+				aria-pressed={distanceUnit === 'mi'}
+				onclick={() => setDistanceUnit('mi')}>mi</button
+			>
+			<button
+				type="button"
+				class:active={distanceUnit === 'km'}
+				aria-pressed={distanceUnit === 'km'}
+				onclick={() => setDistanceUnit('km')}>km</button
+			>
+		</div>
 		{#if !isViewer}
 			<button class="btn small" type="button" onclick={openDayPlanBuilder}>Build day</button>
 		{/if}
@@ -1648,7 +1695,7 @@
 														<div class="suggestion-row">
 															<span class="grow"
 																>{sug.name}<span class="muted">
-																	— {formatKm(sug.distance_km)} from route{#if sug.vicinity}
+																	— {fmtDistance(sug.distance_km)} from route{#if sug.vicinity}
 																		— {sug.vicinity}{/if}</span
 																></span
 															>
@@ -1666,7 +1713,7 @@
 														<div class="suggestion-row">
 															<span class="grow"
 																>{sug.name}<span class="muted">
-																	— {formatKm(sug.distance_km)} from route{#if sug.vicinity}
+																	— {fmtDistance(sug.distance_km)} from route{#if sug.vicinity}
 																		— {sug.vicinity}{/if}</span
 																></span
 															>
@@ -3838,6 +3885,32 @@
 	/* ── Day plans ── */
 	.dayplans-card .section-header {
 		margin-bottom: 8px;
+	}
+	.unit-toggle {
+		display: inline-flex;
+		flex-shrink: 0;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		overflow: hidden;
+		background: var(--card);
+	}
+	.unit-toggle button {
+		min-width: 42px;
+		min-height: 36px;
+		border: 0;
+		border-radius: 0;
+		padding: 6px 10px;
+		background: transparent;
+		color: var(--muted);
+		font-weight: 700;
+		font-size: 0.82rem;
+	}
+	.unit-toggle button + button {
+		border-left: 1px solid var(--border);
+	}
+	.unit-toggle button.active {
+		background: var(--accent);
+		color: #fff;
 	}
 	.dayplan-list {
 		display: grid;
