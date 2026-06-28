@@ -1,13 +1,14 @@
 // Pure builders for map deep links — Google Maps, Apple Maps, and directions.
 // No DOM/Google JS API needed, so these work in SSR, the PWA offline shell, and
 // are fully unit-testable. A place needs only a name to get useful links;
-// coordinates / place_id make them precise.
+// coordinates / provider place ids make them precise.
 
 export interface MapPlace {
 	name: string;
 	lat?: number | null;
 	lon?: number | null;
 	place_id?: string | null;
+	apple_maps_place_id?: string | null;
 }
 
 export interface DayPlanDirectionStop {
@@ -46,8 +47,13 @@ export function appleMapsLink(p: MapPlace): string {
 	const params = new URLSearchParams();
 	if (p.name) {
 		params.set('q', p.name);
-	} else if (hasCoords(p)) {
+	}
+	if (hasCoords(p)) {
 		params.set('ll', coordStr(p));
+	}
+	if (p.apple_maps_place_id) {
+		params.set('auid', p.apple_maps_place_id);
+		params.set('lsp', '9902');
 	}
 	return `https://maps.apple.com/?${params.toString()}`;
 }

@@ -348,7 +348,8 @@
 		name: n.title,
 		lat: n.lat,
 		lon: n.lon,
-		place_id: n.place_id
+		place_id: n.place_id,
+		apple_maps_place_id: n.apple_maps_place_id
 	});
 
 	// Pins for the map: places that have coordinates.
@@ -380,6 +381,7 @@
 		lat: number | null;
 		lon: number | null;
 		place_id: string | null;
+		apple_maps_place_id: string | null;
 	};
 	let dayPlanBuilderOpen = $state(false);
 	let dayPlanTitle = $state('');
@@ -421,7 +423,13 @@
 	});
 
 	function stopPlace(stop: BuilderStop): MapPlace {
-		return { name: stop.title, lat: stop.lat, lon: stop.lon, place_id: stop.place_id };
+		return {
+			name: stop.title,
+			lat: stop.lat,
+			lon: stop.lon,
+			place_id: stop.place_id,
+			apple_maps_place_id: stop.apple_maps_place_id
+		};
 	}
 
 	function savedStopPlace(stop: DayPlanStop): MapPlace {
@@ -862,7 +870,8 @@
 				notes: '',
 				lat: row.node.lat,
 				lon: row.node.lon,
-				place_id: row.node.place_id
+				place_id: row.node.place_id,
+				apple_maps_place_id: row.node.apple_maps_place_id
 			}
 		];
 		builderRouteSummary = '';
@@ -905,7 +914,7 @@
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ id, visited })
 		});
-		if (res.ok) invalidateAll();
+		if (res.ok) await invalidateAll();
 	}
 
 	async function reorderSavedStop(planId: number, stopId: number, delta: number) {
@@ -918,7 +927,7 @@
 		fd.set('plan_id', String(planId));
 		fd.set('ordered_stop_ids', JSON.stringify(ids));
 		const res = await fetch('?/dayplan-reorder', { method: 'POST', body: fd });
-		if (res.ok) invalidateAll();
+		if (res.ok) await invalidateAll();
 	}
 
 	function selectPin(id: number) {
@@ -1525,6 +1534,12 @@
 															target="_blank"
 															rel="noopener">Google</a
 														>
+														<a
+															class="chip-link"
+															href={appleMapsLink(savedStopPlace(stop))}
+															target="_blank"
+															rel="noopener">Apple</a
+														>
 														{#if !isViewer}
 															<button
 																type="button"
@@ -1702,10 +1717,11 @@
 					formData.set('notes', dayPlanNotes);
 					formData.set('stops', builderStopsJson);
 					return async ({ result, update }) => {
-						await update({ reset: false });
+						await update({ reset: false, invalidateAll: result.type !== 'success' });
 						if (result.type === 'success') {
 							resetDayPlanBuilder();
 							dayPlanBuilderOpen = false;
+							await invalidateAll();
 						}
 					};
 				}}

@@ -28,10 +28,10 @@ describe('googleMapsLink', () => {
 });
 
 describe('appleMapsLink', () => {
-	it('uses a name search when a name exists', () => {
+	it('uses a name plus coordinates when both exist', () => {
 		const u = appleMapsLink({ name: 'Arles', lat: 43.67, lon: 4.63 });
 		expect(u).toContain('q=Arles');
-		expect(u).not.toContain('ll=');
+		expect(u).toContain('ll=43.67%2C4.63');
 	});
 	it('includes ll when only coordinates exist', () => {
 		const u = appleMapsLink({ name: '', lat: 43.67, lon: 4.63 });
@@ -39,6 +39,16 @@ describe('appleMapsLink', () => {
 	});
 	it('name-only still produces a query', () => {
 		expect(appleMapsLink({ name: 'Arles' })).toBe('https://maps.apple.com/?q=Arles');
+	});
+	it('includes Apple Maps place id when present', () => {
+		const u = appleMapsLink({
+			name: 'Arborvine',
+			lat: 44.4115,
+			lon: -68.5924,
+			apple_maps_place_id: '1234567890'
+		});
+		expect(u).toContain('auid=1234567890');
+		expect(u).toContain('lsp=9902');
 	});
 });
 

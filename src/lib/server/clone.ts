@@ -38,7 +38,7 @@ export async function duplicateTrip(
 		// Itinerary tree
 		const itin = await client.query(
 			`SELECT id, parent_id, sort_order, item_type, title, notes, lat, lon,
-			        place_id, external_url, google_maps_url, date
+			        place_id, apple_maps_place_id, external_url, google_maps_url, date
 			   FROM itinerary_items WHERE trip_id = $1`,
 			[tripId]
 		);
@@ -48,8 +48,8 @@ export async function duplicateTrip(
 			const ins = await client.query<{ id: number }>(
 				`INSERT INTO itinerary_items
 				   (trip_id, parent_id, sort_order, item_type, title, notes, lat, lon,
-				    place_id, external_url, google_maps_url, date)
-				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+				    place_id, apple_maps_place_id, external_url, google_maps_url, date)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
 				[
 					newTripId,
 					np,
@@ -60,6 +60,7 @@ export async function duplicateTrip(
 					r.lat,
 					r.lon,
 					r.place_id,
+					r.apple_maps_place_id,
 					r.external_url,
 					r.google_maps_url,
 					r.date

@@ -15,13 +15,14 @@ export interface ItineraryItem {
 	lat: number | null;
 	lon: number | null;
 	place_id: string | null;
+	apple_maps_place_id: string | null;
 	external_url: string | null;
 	google_maps_url: string | null;
 	date: string | null;
 }
 
 const SELECT_COLS = `id, trip_id, parent_id, sort_order, item_type, title, notes,
-	lat, lon, place_id, external_url, google_maps_url,
+	lat, lon, place_id, apple_maps_place_id, external_url, google_maps_url,
 	to_char(date, 'YYYY-MM-DD') AS date`;
 
 /** Flat list of a trip's itinerary items (the client assembles the tree). */
@@ -153,7 +154,12 @@ export async function setLocation(
 	placeId: string | null
 ): Promise<boolean> {
 	const res = await query(
-		`UPDATE itinerary_items SET lat = $3, lon = $4, place_id = $5, updated_at = NOW()
+		`UPDATE itinerary_items
+		    SET lat = $3,
+		        lon = $4,
+		        place_id = $5,
+		        apple_maps_place_id = NULL,
+		        updated_at = NOW()
 		 WHERE id = $1 AND trip_id = $2`,
 		[id, tripId, lat, lon, placeId]
 	);
@@ -162,7 +168,12 @@ export async function setLocation(
 
 export async function clearLocation(tripId: number, id: number): Promise<boolean> {
 	const res = await query(
-		`UPDATE itinerary_items SET lat = NULL, lon = NULL, place_id = NULL, updated_at = NOW()
+		`UPDATE itinerary_items
+		    SET lat = NULL,
+		        lon = NULL,
+		        place_id = NULL,
+		        apple_maps_place_id = NULL,
+		        updated_at = NOW()
 		 WHERE id = $1 AND trip_id = $2`,
 		[id, tripId]
 	);
