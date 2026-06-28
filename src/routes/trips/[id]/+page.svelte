@@ -6,6 +6,7 @@
 	import { flushSync, onMount } from 'svelte';
 	import AttachmentDownloadButton from '$components/AttachmentDownloadButton.svelte';
 	import PinMap from '$components/PinMap.svelte';
+	import SearchableSelect from '$components/SearchableSelect.svelte';
 	import {
 		googleMapsLink,
 		appleMapsLink,
@@ -258,6 +259,21 @@
 
 	function itinMoveParentsFor(id: number) {
 		return itinImportParents.filter(({ node }) => node.id !== id && !isItinDescendant(node.id, id));
+	}
+
+	function itinParentOptionLabel(row: (typeof data.itineraryRows)[number]) {
+		return `${'· '.repeat(row.depth)}${row.node.title} (${row.node.item_type})`;
+	}
+
+	function itinMoveParentOptionsFor(id: number) {
+		return [
+			{ value: '', label: 'Top level' },
+			...itinMoveParentsFor(id).map((row) => ({
+				value: String(row.node.id),
+				label: itinParentOptionLabel(row),
+				searchText: `${row.node.title} ${row.node.item_type}`
+			}))
+		];
 	}
 
 	function withItinSelection(raw: ItinCandidateRaw[]): ItinCandidate[] {
@@ -2049,18 +2065,14 @@
 										<input type="hidden" name="id" value={node.id} />
 										<label>
 											Move under
-											<select name="parent_id">
-												<option value="" selected={node.parent_id === null}>Top level</option>
-												{#each itinMoveParentsFor(node.id) as parentRow (parentRow.node.id)}
-													<option
-														value={String(parentRow.node.id)}
-														selected={node.parent_id === parentRow.node.id}
-													>
-														{'· '.repeat(parentRow.depth)}{parentRow.node.title} ({parentRow.node
-															.item_type})
-													</option>
-												{/each}
-											</select>
+											<SearchableSelect
+												name="parent_id"
+												selectedValue={node.parent_id === null ? '' : String(node.parent_id)}
+												options={itinMoveParentOptionsFor(node.id)}
+												ariaLabel={`Move ${node.title} under`}
+												placeholder="Search parent"
+												listboxId={`itin-parent-options-${node.id}`}
+											/>
 										</label>
 										<button class="btn small" type="submit">Move</button>
 									</form>
