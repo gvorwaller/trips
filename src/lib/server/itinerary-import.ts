@@ -18,6 +18,7 @@ export interface ItineraryImportCandidate {
 	lat?: number | null;
 	lon?: number | null;
 	place_id?: string | null;
+	apple_maps_place_id?: string | null;
 	children?: ItineraryImportCandidate[];
 }
 
@@ -30,6 +31,7 @@ interface PreparedItem {
 	lat: number | null;
 	lon: number | null;
 	place_id: string | null;
+	apple_maps_place_id: string | null;
 	children: PreparedItem[];
 }
 
@@ -124,6 +126,7 @@ async function prepareItem(
 	let lat = cleanNumber(raw.lat, -90, 90);
 	let lon = cleanNumber(raw.lon, -180, 180);
 	let placeId = cleanString(raw.place_id, 300);
+	const appleMapsPlaceId = cleanString(raw.apple_maps_place_id, 300);
 
 	if (item_type === 'place' && options.geocode && (lat === null || lon === null)) {
 		const q = locationQuery ?? address ?? [title, options.tripName].filter(Boolean).join(', ');
@@ -159,6 +162,7 @@ async function prepareItem(
 		lat,
 		lon,
 		place_id: placeId,
+		apple_maps_place_id: appleMapsPlaceId,
 		children
 	};
 }
@@ -185,8 +189,8 @@ async function insertPrepared(
 	const sort = await nextSortOrder(client, 'itinerary_items', tripId, parentId);
 	const res = await client.query<{ id: number }>(
 		`INSERT INTO itinerary_items
-		   (trip_id, parent_id, sort_order, item_type, title, notes, external_url, date, lat, lon, place_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		   (trip_id, parent_id, sort_order, item_type, title, notes, external_url, date, lat, lon, place_id, apple_maps_place_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 RETURNING id`,
 		[
 			tripId,
@@ -199,7 +203,8 @@ async function insertPrepared(
 			item.date,
 			item.lat,
 			item.lon,
-			item.place_id
+			item.place_id,
+			item.apple_maps_place_id
 		]
 	);
 	const id = res.rows[0].id;

@@ -15,6 +15,19 @@
 		if (start && end) return `${f(start)} – ${f(end)}`;
 		return f((start ?? end) as string);
 	}
+
+	function fmtUpdated(value: string): string {
+		const d = new Date(value);
+		if (Number.isNaN(d.getTime())) return 'Updated date unknown';
+		return `Updated ${d.toLocaleDateString(undefined, {
+			month: 'short',
+			day: 'numeric',
+			year: 'numeric'
+		})} ${d.toLocaleTimeString(undefined, {
+			hour: 'numeric',
+			minute: '2-digit'
+		})}`;
+	}
 </script>
 
 <svelte:head><title>Trips</title></svelte:head>
@@ -40,6 +53,7 @@
 				<div class="grow">
 					<div class="name"><a href="/trips/{trip.id}">{trip.name}</a></div>
 					<div class="meta">{fmtRange(trip.start_date, trip.end_date)}</div>
+					<div class="meta">{fmtUpdated(trip.updated_at)}</div>
 				</div>
 			</div>
 		{/each}

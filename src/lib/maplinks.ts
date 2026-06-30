@@ -112,13 +112,19 @@ export function googleLegByLegLinks(
 }
 
 /** Day-plan directions using captured snapshot fields, robust to deleted places. */
-export function dayPlanDirectionsLink(stops: DayPlanDirectionStop[]): string | null {
+export function dayPlanDirectionsLink(
+	stops: DayPlanDirectionStop[],
+	anchor: MapPlace | null = null
+): string | null {
 	return googleDayDirectionsLink(
-		stops.map((s) => ({
-			name: s.snapshot_title,
-			lat: s.snapshot_lat,
-			lon: s.snapshot_lon,
-			place_id: s.snapshot_place_id
-		}))
+		[
+			anchor,
+			...stops.map((s) => ({
+				name: s.snapshot_title,
+				lat: s.snapshot_lat,
+				lon: s.snapshot_lon,
+				place_id: s.snapshot_place_id
+			}))
+		].filter((p): p is MapPlace => p !== null)
 	);
 }

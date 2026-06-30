@@ -114,15 +114,26 @@ export async function duplicateTrip(
 
 		// Day plans + stops. Stop visited state resets for a fresh copy, like packing checks.
 		const plans = await client.query(
-			`SELECT id, title, notes, optional_date FROM day_plans WHERE trip_id = $1 ORDER BY id`,
+			`SELECT id, title, notes, optional_date, anchor_source, anchor_title, anchor_lat, anchor_lon
+			   FROM day_plans WHERE trip_id = $1 ORDER BY id`,
 			[tripId]
 		);
 		for (const plan of plans.rows) {
 			const newPlan = await client.query<{ id: number }>(
-				`INSERT INTO day_plans (trip_id, title, notes, optional_date)
-				 VALUES ($1,$2,$3,$4)
+				`INSERT INTO day_plans
+				   (trip_id, title, notes, optional_date, anchor_source, anchor_title, anchor_lat, anchor_lon)
+				 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 				 RETURNING id`,
-				[newTripId, plan.title, plan.notes, plan.optional_date]
+				[
+					newTripId,
+					plan.title,
+					plan.notes,
+					plan.optional_date,
+					plan.anchor_source,
+					plan.anchor_title,
+					plan.anchor_lat,
+					plan.anchor_lon
+				]
 			);
 			const stops = await client.query(
 				`SELECT itinerary_item_id, sort_order, notes, snapshot_title,

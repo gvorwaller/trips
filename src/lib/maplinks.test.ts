@@ -127,4 +127,19 @@ describe('dayPlanDirectionsLink', () => {
 		expect(u).toContain('origin=Start');
 		expect(u).toContain('destination=4%2C5');
 	});
+	it('uses a persisted anchor as the route origin', () => {
+		const u = dayPlanDirectionsLink(
+			[
+				{
+					snapshot_title: 'Stop',
+					snapshot_lat: 4,
+					snapshot_lon: 5,
+					snapshot_place_id: null
+				}
+			],
+			{ name: 'Blue Hill, ME', lat: 44.4139, lon: -68.5867 }
+		) as string;
+		expect(u).toContain('origin=44.4139%2C-68.5867');
+		expect(u).toContain('destination=4%2C5');
+	});
 });

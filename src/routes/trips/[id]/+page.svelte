@@ -214,6 +214,7 @@
 		lat: number | null;
 		lon: number | null;
 		place_id: string | null;
+		apple_maps_place_id: string | null;
 		children: ItinCandidateRaw[];
 		duplicate?: boolean;
 		duplicate_title?: string | null;
@@ -359,7 +360,14 @@
 	const itinHasChildren = (id: number) => data.itineraryRows.some((r) => r.node.parent_id === id);
 
 	type ItinNode = PageData['itineraryRows'][number]['node'];
+	type DayPlan = PageData['dayPlans'][number];
 	type DayPlanStop = PageData['dayPlanStops'][number];
+	type PlanAnchor = {
+		source: string;
+		title: string;
+		lat: number;
+		lon: number;
+	};
 	const toPlace = (n: ItinNode): MapPlace => ({
 		name: n.title,
 		lat: n.lat,
@@ -462,6 +470,7 @@
 	type AnchorOption = {
 		value: string;
 		label: string;
+		title: string;
 		lat: number | null;
 		lon: number | null;
 	};
@@ -493,8 +502,10 @@
 		});
 	}
 
-	function anchorOptions(planDate: string | null): AnchorOption[] {
-		const options: AnchorOption[] = [{ value: 'none', label: 'No anchor', lat: null, lon: null }];
+	function anchorOptions(planDate: string | null, currentAnchor: PlanAnchor | null = null): AnchorOption[] {
+		const options: AnchorOption[] = [
+			{ value: 'none', label: 'No anchor', title: '', lat: null, lon: null }
+		];
 		for (const reservation of data.reservations) {
 			if (
 				reservation.reservation_type !== 'accommodation' ||
@@ -507,6 +518,7 @@
 				options.push({
 					value: `res:${reservation.id}`,
 					label: `Stay: ${reservation.title}`,
+					title: `Stay: ${reservation.title}`,
 					lat: place.node.lat,
 					lon: place.node.lon
 				});
@@ -517,16 +529,63 @@
 			options.push({
 				value: `place:${node.id}`,
 				label: `Place: ${node.title}`,
+				title: `Place: ${node.title}`,
 				lat: node.lat,
 				lon: node.lon
+			});
+		}
+		if (currentAnchor && !options.some((option) => option.value === currentAnchor.source)) {
+			options.push({
+				value: currentAnchor.source,
+				label: currentAnchor.title,
+				title: currentAnchor.title,
+				lat: currentAnchor.lat,
+				lon: currentAnchor.lon
 			});
 		}
 		return options;
 	}
 
-	function anchorFromValue(value: string, planDate: string | null) {
+	function anchorFromValue(value: string, planDate: string | null): PlanAnchor | null {
 		const option = anchorOptions(planDate).find((o) => o.value === value);
-		return option?.lat != null && option.lon != null ? { lat: option.lat, lon: option.lon } : null;
+		return option?.lat != null && option.lon != null
+			? { source: option.value, title: option.title, lat: option.lat, lon: option.lon }
+			: null;
+	}
+
+	function anchorPlace(anchor: PlanAnchor | null): MapPlace | null {
+		return anchor ? { name: anchor.title, lat: anchor.lat, lon: anchor.lon } : null;
+	}
+
+	function planAnchor(plan: DayPlan): PlanAnchor | null {
+		if (
+			!plan.anchor_source ||
+			!plan.anchor_title ||
+			typeof plan.anchor_lat !== 'number' ||
+			typeof plan.anchor_lon !== 'number'
+		) {
+			return null;
+		}
+		return {
+			source: plan.anchor_source,
+			title: plan.anchor_title,
+			lat: plan.anchor_lat,
+			lon: plan.anchor_lon
+		};
+	}
+
+	function routePlaces(stops: DayPlanStop[], anchor: PlanAnchor | null): MapPlace[] {
+		return [
+			anchorPlace(anchor),
+			...stops.map(savedStopPlace)
+		].filter((p): p is MapPlace => p !== null);
+	}
+
+	function builderRoutePlaces(): MapPlace[] {
+		return [
+			anchorPlace(anchorFromValue(builderAnchor, dayPlanDate || null)),
+			...dayPlanStops.map(stopPlace)
+		].filter((p): p is MapPlace => p !== null);
 	}
 
 	function weatherPeriodsForPlan(
@@ -596,13 +655,13 @@
 		);
 	}
 
-	function canCalculateDriving(stops: DayPlanStop[]): boolean {
+	function canCalculateDriving(stops: DayPlanStop[], anchor: PlanAnchor | null): boolean {
 		const routeStops = savedRouteStops(stops);
-		return routeStops.length >= 2 && allStopsLocated(routeStops);
+		return routeStops.length >= (anchor ? 1 : 2) && allStopsLocated(routeStops);
 	}
 
-	function canOptimizeRoute(stops: RouteStop[]): boolean {
-		return locatedCount(stops) >= 3;
+	function canOptimizeRoute(stops: RouteStop[], anchor: PlanAnchor | null = null): boolean {
+		return locatedCount(stops) >= (anchor ? 2 : 3);
 	}
 
 	function canSuggestStops(stops: DayPlanStop[]): boolean {
@@ -619,8 +678,8 @@
 		return orderedIds.map((id) => byId.get(id)).filter((s): s is BuilderStop => !!s);
 	}
 
-	function persistedDrivingSummary(stops: DayPlanStop[]): string | null {
-		const legs = stops.slice(1);
+	function persistedDrivingSummary(stops: DayPlanStop[], anchor: PlanAnchor | null): string | null {
+		const legs = anchor ? stops : stops.slice(1);
 		if (legs.length === 0 || !legs.every((s) => s.drive_km != null && s.drive_min != null)) {
 			return null;
 		}
@@ -629,16 +688,30 @@
 		return `${fmtDistance(km)}, ${formatDuration(min)}`;
 	}
 
-	function routeSummary(stops: DayPlanStop[]): string | null {
-		const driving = persistedDrivingSummary(stops);
+	function routeSummary(stops: DayPlanStop[], anchor: PlanAnchor | null): string | null {
+		const driving = persistedDrivingSummary(stops, anchor);
 		if (driving) return driving;
-		const straight = routeDistance(stops.map(savedStopPlace));
+		const straight = routeDistance(routePlaces(stops, anchor));
 		return straight ? `~${straight} straight-line` : null;
 	}
 
-	function legSummary(prev: DayPlanStop | null, stop: DayPlanStop): string | null {
+	function legSummary(
+		prev: DayPlanStop | null,
+		stop: DayPlanStop,
+		anchor: PlanAnchor | null
+	): string | null {
 		if (stop.drive_km != null && stop.drive_min != null) {
 			return `${fmtDistance(stop.drive_km)}, ${formatDuration(stop.drive_min)}`;
+		}
+		if (
+			!prev &&
+			anchor &&
+			typeof stop.snapshot_lat === 'number' &&
+			typeof stop.snapshot_lon === 'number'
+		) {
+			return `~${fmtDistance(
+				haversineKm(anchor.lat, anchor.lon, stop.snapshot_lat, stop.snapshot_lon)
+			)} straight-line`;
 		}
 		if (
 			prev &&
@@ -677,22 +750,30 @@
 		throw new Error('Action failed.');
 	}
 
-	async function persistDriving(planId: number, stops: DayPlanStop[]): Promise<void> {
-		const legs = await computeLegDistances(MAPS_API_KEY, savedRouteStops(stops));
+	async function persistDriving(
+		planId: number,
+		stops: DayPlanStop[],
+		anchor: PlanAnchor | null
+	): Promise<void> {
+		const legs = await computeLegDistances(MAPS_API_KEY, savedRouteStops(stops), anchor);
 		const fd = new FormData();
 		fd.set('plan_id', String(planId));
 		fd.set('legs', JSON.stringify(legs));
 		await postAction('dayplan-set-driving', fd);
 	}
 
-	async function calculateSavedDriving(planId: number, stops = stopsForPlan(planId)) {
+	async function calculateSavedDriving(
+		planId: number,
+		stops = stopsForPlan(planId),
+		anchor: PlanAnchor | null = null
+	) {
 		if (!MAPS_API_KEY) {
 			setRouteStatus(planId, 'Google Maps key is not configured.');
 			return;
 		}
 		dayPlanRouteBusy = planId;
 		try {
-			await persistDriving(planId, stops);
+			await persistDriving(planId, stops, anchor);
 			setRouteStatus(planId, 'Driving distances updated.');
 			await invalidateAll();
 		} catch (err) {
@@ -702,6 +783,23 @@
 			);
 		} finally {
 			dayPlanRouteBusy = null;
+		}
+	}
+
+	async function setSavedPlanAnchor(planId: number, planDate: string | null, value: string) {
+		savedPlanAnchors = { ...savedPlanAnchors, [planId]: value };
+		const anchor = anchorFromValue(value, planDate);
+		const fd = new FormData();
+		fd.set('plan_id', String(planId));
+		fd.set('anchor_source', anchor?.source ?? '');
+		fd.set('anchor_title', anchor?.title ?? '');
+		fd.set('anchor_lat', anchor ? String(anchor.lat) : '');
+		fd.set('anchor_lon', anchor ? String(anchor.lon) : '');
+		try {
+			await postAction('dayplan-set-anchor', fd);
+			await invalidateAll();
+		} catch (err) {
+			setRouteStatus(planId, err instanceof Error ? err.message : 'Could not save anchor.');
 		}
 	}
 
@@ -746,7 +844,7 @@
 
 			const orderedStops = orderSavedStops(stops, orderedIds);
 			if (MAPS_API_KEY && allStopsLocated(savedRouteStops(orderedStops))) {
-				await persistDriving(planId, orderedStops);
+				await persistDriving(planId, orderedStops, anchor);
 				setRouteStatus(planId, 'Route optimized and distances updated.');
 			} else if (MAPS_API_KEY) {
 				setRouteStatus(
@@ -766,8 +864,8 @@
 
 	async function optimizeBuilderStops() {
 		const routeStops = builderRouteStops();
-		if (!canOptimizeRoute(routeStops)) return;
 		const anchor = anchorFromValue(builderAnchor, dayPlanDate || null);
+		if (!canOptimizeRoute(routeStops, anchor)) return;
 		dayPlanRouteBusy = 'builder';
 		try {
 			let orderedIds: number[];
@@ -778,14 +876,17 @@
 				builderRouteMin = optimized.totalMin;
 			} else {
 				orderedIds = straightLineOptimize(routeStops, anchor);
-				builderRouteKm = routeDistanceKm(orderBuilderStops(orderedIds).map(stopPlace));
+				builderRouteKm = routeDistanceKm([
+					anchorPlace(anchor),
+					...orderBuilderStops(orderedIds).map(stopPlace)
+				].filter((p): p is MapPlace => p !== null));
 				builderRouteMin = null;
 			}
 			dayPlanStops = orderBuilderStops(orderedIds);
 		} catch {
 			const orderedIds = straightLineOptimize(routeStops, anchor);
 			dayPlanStops = orderBuilderStops(orderedIds);
-			builderRouteKm = routeDistanceKm(dayPlanStops.map(stopPlace));
+			builderRouteKm = routeDistanceKm(builderRoutePlaces());
 			builderRouteMin = null;
 		} finally {
 			dayPlanRouteBusy = null;
@@ -862,9 +963,10 @@
 		}
 	}
 
-	const builderRoute = $derived(googleDayDirectionsLink(dayPlanStops.map(stopPlace)));
-	const builderLegs = $derived(googleLegByLegLinks(dayPlanStops.map(stopPlace)));
-	const builderDistance = $derived(routeDistance(dayPlanStops.map(stopPlace)));
+	const activeBuilderAnchor = $derived(anchorFromValue(builderAnchor, dayPlanDate || null));
+	const builderRoute = $derived(googleDayDirectionsLink(builderRoutePlaces()));
+	const builderLegs = $derived(googleLegByLegLinks(builderRoutePlaces()));
+	const builderDistance = $derived(routeDistance(builderRoutePlaces()));
 	const builderRouteSummary = $derived(
 		builderRouteKm == null
 			? ''
@@ -1451,9 +1553,10 @@
 			<div class="dayplan-list">
 				{#each data.dayPlans as plan (plan.id)}
 					{@const stops = stopsForPlan(plan.id)}
-					{@const directions = dayPlanDirectionsLink(stops)}
-					{@const legLinks = googleLegByLegLinks(stops.map(savedStopPlace))}
-					{@const summary = routeSummary(stops)}
+					{@const anchor = planAnchor(plan)}
+					{@const directions = dayPlanDirectionsLink(stops, anchorPlace(anchor))}
+					{@const legLinks = googleLegByLegLinks(routePlaces(stops, anchor))}
+					{@const summary = routeSummary(stops, anchor)}
 					{@const weather = data.weatherByPlan?.[plan.id]}
 					<article class="dayplan-card">
 						<div class="dayplan-head">
@@ -1468,7 +1571,8 @@
 										})}
 										-
 									{/if}
-									{stops.length} stop{stops.length === 1 ? '' : 's'} - {planProgress(stops)}
+									{#if anchor}Anchor + {/if}{stops.length} stop{stops.length === 1 ? '' : 's'} -
+									{planProgress(stops)}
 									{#if summary}
 										- {summary}{/if}
 								</div>
@@ -1537,35 +1641,32 @@
 										<div class="route-tools">
 											<select
 												aria-label="route anchor"
-												value={savedPlanAnchors[plan.id] ?? 'none'}
+												value={savedPlanAnchors[plan.id] ?? plan.anchor_source ?? 'none'}
 												onchange={(e) =>
-													(savedPlanAnchors = {
-														...savedPlanAnchors,
-														[plan.id]: e.currentTarget.value
-													})}
+													setSavedPlanAnchor(plan.id, plan.optional_date, e.currentTarget.value)}
 											>
-												{#each anchorOptions(plan.optional_date) as anchor (anchor.value)}
-													<option value={anchor.value}>{anchor.label}</option>
+												{#each anchorOptions(plan.optional_date, anchor) as anchorOption (anchorOption.value)}
+													<option value={anchorOption.value}>{anchorOption.label}</option>
 												{/each}
 											</select>
 											<button
 												class="btn small"
 												type="button"
-												disabled={!canCalculateDriving(stops) || dayPlanRouteBusy === plan.id}
-												onclick={() => calculateSavedDriving(plan.id, stops)}
+												disabled={!canCalculateDriving(stops, anchor) || dayPlanRouteBusy === plan.id}
+												onclick={() => calculateSavedDriving(plan.id, stops, anchor)}
 											>
 												{dayPlanRouteBusy === plan.id ? 'Working...' : 'Calculate distances'}
 											</button>
 											<button
 												class="btn small primary"
 												type="button"
-												disabled={!canOptimizeRoute(savedRouteStops(stops)) ||
+												disabled={!canOptimizeRoute(savedRouteStops(stops), anchor) ||
 													dayPlanRouteBusy === plan.id}
 												onclick={() =>
 													optimizeSavedPlan(
 														plan.id,
 														plan.optional_date,
-														savedPlanAnchors[plan.id] ?? 'none',
+														savedPlanAnchors[plan.id] ?? plan.anchor_source ?? 'none',
 														stops
 													)}
 											>
@@ -1577,10 +1678,38 @@
 										{/if}
 									{/if}
 									<ol class="dayplan-stops">
+										{#if anchor}
+											<li class="dayplan-anchor-stop">
+												<div class="dayplan-stop-row">
+													<div class="dayplan-visited">
+														<span class="anchor-badge">Anchor</span>
+														<span>{anchor.title}</span>
+													</div>
+													<div class="dayplan-stop-links">
+														<a
+															class="chip-link"
+															href={googleMapsLink(anchorPlace(anchor)!)}
+															target="_blank"
+															rel="noopener">Google</a
+														>
+														<a
+															class="chip-link"
+															href={appleMapsLink(anchorPlace(anchor)!)}
+															target="_blank"
+															rel="noopener">Apple</a
+														>
+													</div>
+												</div>
+											</li>
+										{/if}
 										{#each stops as stop, i (stop.id)}
-											{@const leg = i > 0 ? legSummary(stops[i - 1], stop) : null}
+											{@const leg = legSummary(i > 0 ? stops[i - 1] : null, stop, anchor)}
 											<li>
-												{#if leg}<div class="drive-leg">Drive from previous: {leg}</div>{/if}
+												{#if leg}
+													<div class="drive-leg">
+														Drive from {i === 0 && anchor ? 'anchor' : 'previous'}: {leg}
+													</div>
+												{/if}
 												<div class="dayplan-stop-row">
 													<label class="dayplan-visited">
 														<input
@@ -1779,6 +1908,11 @@
 					formData.set('optional_date', dayPlanDate);
 					formData.set('notes', dayPlanNotes);
 					formData.set('stops', builderStopsJson);
+					const anchor = anchorFromValue(builderAnchor, dayPlanDate || null);
+					formData.set('anchor_source', anchor?.source ?? '');
+					formData.set('anchor_title', anchor?.title ?? '');
+					formData.set('anchor_lat', anchor ? String(anchor.lat) : '');
+					formData.set('anchor_lon', anchor ? String(anchor.lon) : '');
 					return async ({ result, update }) => {
 						await update({ reset: false, invalidateAll: result.type !== 'success' });
 						if (result.type === 'success') {
@@ -1860,7 +1994,10 @@
 							<button
 								class="btn small primary"
 								type="button"
-								disabled={!canOptimizeRoute(builderRouteStops()) || dayPlanRouteBusy === 'builder'}
+								disabled={!canOptimizeRoute(
+									builderRouteStops(),
+									anchorFromValue(builderAnchor, dayPlanDate || null)
+								) || dayPlanRouteBusy === 'builder'}
 								onclick={optimizeBuilderStops}
 							>
 								{dayPlanRouteBusy === 'builder' ? 'Working...' : 'Optimize order'}
@@ -1870,6 +2007,12 @@
 							{/if}
 						</div>
 						<ol class="builder-stops">
+							{#if activeBuilderAnchor}
+								<li class="dayplan-anchor-stop">
+									<span class="anchor-badge">Anchor</span>
+									<span class="ttl">{activeBuilderAnchor.title}</span>
+								</li>
+							{/if}
 							{#each dayPlanStops as stop, i (stop.itinerary_item_id)}
 								<li>
 									<span class="ttl">{stop.title}</span>
@@ -2203,9 +2346,9 @@
 				</div>
 			</details>
 			<details class="paste">
-				<summary>Import from Google Maps link</summary>
+				<summary>Import from Maps link</summary>
 				<div class="extract">
-					<p class="extract-head">Paste a Google Maps link to extract the place and coordinates.</p>
+					<p class="extract-head">Paste a Google Maps or Apple Maps link to extract the place and coordinates.</p>
 					<form
 						method="POST"
 						action="?/itin-extract-url"
@@ -2236,7 +2379,7 @@
 							type="url"
 							name="url"
 							bind:value={itinUrlText}
-							placeholder="https://maps.google.com/... or maps.app.goo.gl/..."
+							placeholder="https://maps.google.com/... or https://maps.apple.com/..."
 						/>
 						<button
 							class="btn small"
@@ -4000,6 +4143,21 @@
 	.dayplan-stop-links button:disabled,
 	.builder-controls button:disabled {
 		opacity: 0.45;
+	}
+	.dayplan-anchor-stop {
+		color: var(--text);
+	}
+	.anchor-badge {
+		display: inline-flex;
+		align-items: center;
+		min-height: 24px;
+		padding: 0 8px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		color: var(--muted);
+		font-size: 0.78rem;
+		font-weight: 700;
+		text-transform: uppercase;
 	}
 	.dayplan-stop-note {
 		padding-left: 30px;

@@ -1,6 +1,7 @@
 import { env } from '$env/dynamic/private';
 import { ITEM_TYPES, type ItemType } from './itinerary';
 import { parseGoogleMapsUrl } from './google-maps-url';
+import { parseAppleMapsUrl } from './apple-maps-url';
 import { geocodePlace } from './geocode';
 
 const ANTHROPIC_API = 'https://api.anthropic.com/v1/messages';
@@ -22,6 +23,7 @@ export interface ExtractedItineraryItem {
 	lat: number | null;
 	lon: number | null;
 	place_id: string | null;
+	apple_maps_place_id: string | null;
 	children: ExtractedItineraryItem[];
 }
 
@@ -242,6 +244,7 @@ function normalizeItem(raw: unknown, depth: number, count: { n: number }): Extra
 		lat: cleanNumber(obj.lat, -90, 90),
 		lon: cleanNumber(obj.lon, -180, 180),
 		place_id: null,
+		apple_maps_place_id: null,
 		children
 	};
 }
@@ -342,6 +345,51 @@ export async function extractItineraryFromGoogleMapsUrl(
 		lat: Number.isFinite(lat) ? lat : null,
 		lon: Number.isFinite(lng) ? lng : null,
 		place_id: placeId,
+		apple_maps_place_id: null,
+		children: []
+	};
+	return [item];
+}
+
+export async function extractItineraryFromAppleMapsUrl(
+	rawUrl: string,
+	context: ItineraryExtractContext = {}
+): Promise<ExtractedItineraryItem[] | null> {
+	const parsed = await parseAppleMapsUrl(rawUrl);
+	if (!parsed) return null;
+
+	let { lat, lng, name } = parsed;
+	let placeId: string | null = null;
+	const query = parsed.placeQuery ?? name ?? parsed.address;
+
+	if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+		if (!query) return null;
+		const geo = await geocodePlace(context.tripName ? `${query}, ${context.tripName}` : query);
+		if (geo) {
+			lat = geo.lat;
+			lng = geo.lng;
+			placeId = geo.place_id;
+			if (!name) name = geo.name;
+		}
+	} else if (query) {
+		const geo = await geocodePlace(query, { lat, lng, radiusM: 750 });
+		placeId = geo?.place_id ?? null;
+		if (!name) name = geo?.name ?? query;
+	}
+
+	const title = name ?? parsed.address ?? 'Unnamed place';
+	const item: ExtractedItineraryItem = {
+		item_type: 'place',
+		title,
+		date: null,
+		notes: null,
+		external_url: rawUrl.trim(),
+		address: parsed.address,
+		location_query: query,
+		lat: Number.isFinite(lat) ? lat : null,
+		lon: Number.isFinite(lng) ? lng : null,
+		place_id: placeId,
+		apple_maps_place_id: parsed.appleMapsPlaceId,
 		children: []
 	};
 	return [item];

@@ -72,15 +72,19 @@ function totals(route: {
  */
 export async function computeLegDistances(
 	apiKey: string,
-	stops: RouteStop[]
+	stops: RouteStop[],
+	anchor: AnchorPoint | null = null
 ): Promise<DrivingLeg[]> {
 	const located = requireAllLocated(stops);
-	if (located.length < 2) throw new Error('Need at least 2 stops with coordinates.');
+	if (located.length < (anchor ? 1 : 2)) {
+		throw new Error(anchor ? 'Need at least 1 stop with coordinates.' : 'Need at least 2 stops with coordinates.');
+	}
 
 	const service = await directionsService(apiKey);
-	const origin = located[0];
+	const origin = anchor ?? located[0];
 	const destination = located[located.length - 1];
-	const waypoints = located.slice(1, -1).map((s) => ({
+	const waypointSource = anchor ? located.slice(0, -1) : located.slice(1, -1);
+	const waypoints = waypointSource.map((s) => ({
 		location: { lat: s.lat, lng: s.lon },
 		stopover: true
 	}));
@@ -97,7 +101,7 @@ export async function computeLegDistances(
 	if (!route) throw new Error('No drivable route found.');
 	return (route.legs ?? []).map(
 		(leg: { distance?: { value?: number }; duration?: { value?: number } }, i: number) => ({
-			stopId: located[i + 1].id,
+			stopId: located[anchor ? i : i + 1].id,
 			km: (leg.distance?.value ?? 0) / 1000,
 			min: Math.round((leg.duration?.value ?? 0) / 60)
 		})
@@ -115,7 +119,14 @@ export async function optimizeDrivingRoute(
 ): Promise<OptimizeResult> {
 	const located = locatedStops(opts.stops);
 	const unlocated = missingStops(opts.stops);
-	if (located.length < 3) throw new Error('Need at least 3 stops with coordinates to optimize.');
+	const minLocated = opts.anchor ? 2 : 3;
+	if (located.length < minLocated) {
+		throw new Error(
+			opts.anchor
+				? 'Need at least 2 stops with coordinates to optimize.'
+				: 'Need at least 3 stops with coordinates to optimize.'
+		);
+	}
 
 	const service = await directionsService(apiKey);
 	const fixedAnchor = opts.anchor ?? { lat: located[0].lat, lon: located[0].lon };

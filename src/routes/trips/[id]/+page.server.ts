@@ -70,6 +70,8 @@ import {
 	bulkUpdateDriving,
 	bulkUpdateAiNotes,
 	optimizeStopOrder,
+	setDayPlanAnchor,
+	type AnchorInput,
 	type StopInput
 } from '$server/dayplans';
 import { generateTripNotes, AiNotesError } from '$server/ai-notes';
@@ -78,9 +80,11 @@ import {
 	extractItineraryFromText,
 	extractItineraryFromImage,
 	extractItineraryFromGoogleMapsUrl,
+	extractItineraryFromAppleMapsUrl,
 	type ExtractedItineraryItem
 } from '$server/itinerary-extract';
 import { isGoogleMapsUrl } from '$server/google-maps-url';
+import { isAppleMapsUrl } from '$server/apple-maps-url';
 import { importItineraryCandidates, type ItineraryImportCandidate } from '$server/itinerary-import';
 import {
 	listAttachmentsForTrip,
@@ -207,6 +211,20 @@ function parseOrigin(form: FormData): { lat: number; lon: number } | null {
 	return { lat, lon };
 }
 
+function parseAnchor(form: FormData): AnchorInput | null {
+	const source = (form.get('anchor_source') ?? '').toString().trim().slice(0, 200);
+	const title = (form.get('anchor_title') ?? '').toString().trim().slice(0, 300);
+	const rawLat = form.get('anchor_lat')?.toString().trim();
+	const rawLon = form.get('anchor_lon')?.toString().trim();
+	if (!source && !title && !rawLat && !rawLon) return null;
+	if (!source || !title || !rawLat || !rawLon) throw error(400, 'Invalid anchor.');
+	const lat = Number(rawLat);
+	const lon = Number(rawLon);
+	if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw error(400, 'Invalid anchor.');
+	if (lat < -90 || lat > 90 || lon < -180 || lon > 180) throw error(400, 'Invalid anchor.');
+	return { source, title, lat, lon };
+}
+
 function manualItineraryText(itemType: ItemType, title: string, notes: string | null) {
 	if (itemType !== 'note' || notes || title.length <= 180)
 		return { title: title.slice(0, 500), notes };
@@ -273,6 +291,10 @@ export const load: PageServerLoad = async ({ params, locals }) => {
 	const weatherByPlan: Record<number, WeatherResult> = {};
 	const weatherJobs: Array<{ planId: number; lat: number; lng: number }> = [];
 	for (const plan of dayPlans) {
+		if (plan.anchor_lat != null && plan.anchor_lon != null) {
+			weatherJobs.push({ planId: plan.id, lat: plan.anchor_lat, lng: plan.anchor_lon });
+			continue;
+		}
 		const planStops = dayPlanStops.filter((s) => s.day_plan_id === plan.id);
 		const first = planStops.find(
 			(s) => typeof s.snapshot_lat === 'number' && typeof s.snapshot_lon === 'number'
@@ -423,24 +445,29 @@ export const actions: Actions = {
 		const trip = await ownTrip(ownerId, tripId);
 		const form = await request.formData();
 		const url = (form.get('url') ?? '').toString().trim();
-		if (!url) return fail(400, { error: 'Paste a Google Maps link.' });
-		if (!isGoogleMapsUrl(url)) {
-			return fail(400, { error: 'Not a recognized Google Maps URL.' });
+		if (!url) return fail(400, { error: 'Paste a Google Maps or Apple Maps link.' });
+		const isGoogle = isGoogleMapsUrl(url);
+		const isApple = isAppleMapsUrl(url);
+		if (!isGoogle && !isApple) {
+			return fail(400, { error: 'Not a recognized Google Maps or Apple Maps URL.' });
 		}
 		const existing = await listItinerary(tripId);
 		const tripDates =
 			trip.start_date || trip.end_date
 				? `${trip.start_date ?? '?'} to ${trip.end_date ?? '?'}`
 				: '';
-		const candidates = await extractItineraryFromGoogleMapsUrl(url, {
+		const extractContext = {
 			tripName: trip.name,
 			tripDates,
 			tripNotes: trip.notes,
 			existingTitles: existing.map((i) => i.title)
-		});
+		};
+		const candidates = isApple
+			? await extractItineraryFromAppleMapsUrl(url, extractContext)
+			: await extractItineraryFromGoogleMapsUrl(url, extractContext);
 		if (!candidates) {
 			return fail(502, {
-				error: 'Could not extract place from that link. Try pasting the full Google Maps URL.'
+				error: 'Could not extract place from that link. Try pasting the full Maps URL.'
 			});
 		}
 		return { ok: true, candidates: markDuplicates(candidates, existing) };
@@ -570,9 +597,19 @@ export const actions: Actions = {
 			title: title.slice(0, 300),
 			notes: cleanText(form.get('notes')),
 			optional_date: optDate(form.get('optional_date')),
+			anchor: parseAnchor(form),
 			stops
 		});
 		return { ok: true, planId };
+	},
+
+	'dayplan-set-anchor': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const ok = await setDayPlanAnchor(tripId, parseId(form.get('plan_id')), parseAnchor(form));
+		if (!ok) return fail(400, { error: 'Day plan not found.' });
+		return { ok: true };
 	},
 
 	'dayplan-edit': async ({ params, request, locals }) => {

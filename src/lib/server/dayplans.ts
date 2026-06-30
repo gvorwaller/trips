@@ -8,6 +8,10 @@ export interface DayPlan {
 	title: string;
 	notes: string | null;
 	optional_date: string | null;
+	anchor_source: string | null;
+	anchor_title: string | null;
+	anchor_lat: number | null;
+	anchor_lon: number | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -34,6 +38,13 @@ export interface DayPlanInput {
 	optional_date: string | null;
 }
 
+export interface AnchorInput {
+	source: string;
+	title: string;
+	lat: number;
+	lon: number;
+}
+
 export interface StopInput {
 	itinerary_item_id: number;
 	notes: string | null;
@@ -52,6 +63,7 @@ export interface OptimizeOrigin {
 
 const PLAN_SELECT = `id, trip_id, title, notes,
 	to_char(optional_date, 'YYYY-MM-DD') AS optional_date,
+	anchor_source, anchor_title, anchor_lat, anchor_lon,
 	created_at::text AS created_at,
 	updated_at::text AS updated_at`;
 
@@ -120,14 +132,24 @@ async function insertStop(
 
 export async function createDayPlan(
 	tripId: number,
-	input: DayPlanInput & { stops: StopInput[] }
+	input: DayPlanInput & { stops: StopInput[]; anchor?: AnchorInput | null }
 ): Promise<number> {
 	return withTransaction(async (client) => {
 		const plan = await client.query<{ id: number }>(
-			`INSERT INTO day_plans (trip_id, title, notes, optional_date)
-			 VALUES ($1,$2,$3,$4)
+			`INSERT INTO day_plans
+			   (trip_id, title, notes, optional_date, anchor_source, anchor_title, anchor_lat, anchor_lon)
+			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			 RETURNING id`,
-			[tripId, input.title, input.notes, input.optional_date]
+			[
+				tripId,
+				input.title,
+				input.notes,
+				input.optional_date,
+				input.anchor?.source ?? null,
+				input.anchor?.title ?? null,
+				input.anchor?.lat ?? null,
+				input.anchor?.lon ?? null
+			]
 		);
 		const planId = plan.rows[0].id;
 		let sort = 0;
@@ -137,6 +159,31 @@ export async function createDayPlan(
 		}
 		return planId;
 	});
+}
+
+export async function setDayPlanAnchor(
+	tripId: number,
+	planId: number,
+	anchor: AnchorInput | null
+): Promise<boolean> {
+	const res = await query(
+		`UPDATE day_plans
+		    SET anchor_source = $3,
+		        anchor_title = $4,
+		        anchor_lat = $5,
+		        anchor_lon = $6,
+		        updated_at = NOW()
+		  WHERE id = $1 AND trip_id = $2`,
+		[
+			planId,
+			tripId,
+			anchor?.source ?? null,
+			anchor?.title ?? null,
+			anchor?.lat ?? null,
+			anchor?.lon ?? null
+		]
+	);
+	return (res.rowCount ?? 0) > 0;
 }
 
 export async function updateDayPlan(
@@ -336,7 +383,12 @@ export async function bulkUpdateDriving(
 			`SELECT id FROM day_plan_stops WHERE day_plan_id = $1 ORDER BY sort_order, id`,
 			[planId]
 		);
-		const expectedLegStopIds = stopRes.rows.slice(1).map((r) => r.id);
+		const planRes = await client.query<{ anchor_lat: number | null; anchor_lon: number | null }>(
+			`SELECT anchor_lat, anchor_lon FROM day_plans WHERE id = $1 AND trip_id = $2`,
+			[planId, tripId]
+		);
+		const hasAnchor = planRes.rows[0]?.anchor_lat != null && planRes.rows[0]?.anchor_lon != null;
+		const expectedLegStopIds = (hasAnchor ? stopRes.rows : stopRes.rows.slice(1)).map((r) => r.id);
 		if (
 			legs.length !== expectedLegStopIds.length ||
 			new Set(legs.map((leg) => leg.stopId)).size !== legs.length ||
