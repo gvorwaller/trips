@@ -60,6 +60,7 @@ import { extractExpensesFromText, extractExpensesFromDocument } from '$server/ex
 import {
 	listDayPlans,
 	listStopsForTrip,
+	getDayPlan,
 	createDayPlan,
 	updateDayPlan,
 	deleteDayPlan,
@@ -760,19 +761,27 @@ export const actions: Actions = {
 		await ownTrip(ownerId, tripId);
 		const form = await request.formData();
 		const planId = parseId(form.get('plan_id'));
+		const plan = await getDayPlan(tripId, planId);
+		if (!plan) return fail(404, { error: 'Day plan not found.' });
 		const allStops = await listStopsForTrip(tripId);
 		const planStops = allStops.filter((s) => s.day_plan_id === planId);
 		const planStopItemIds = new Set(planStops.map((s) => s.itinerary_item_id).filter(Boolean));
 		const locatedStops = planStops.filter(
 			(s) => typeof s.snapshot_lat === 'number' && typeof s.snapshot_lon === 'number'
 		);
-		if (locatedStops.length < 2) {
-			return fail(400, { error: 'Need at least two stops with coordinates.' });
+		const routePoints = [
+			...(plan.anchor_lat != null && plan.anchor_lon != null
+				? [{ lat: plan.anchor_lat, lon: plan.anchor_lon }]
+				: []),
+			...locatedStops.map((s) => ({ lat: s.snapshot_lat!, lon: s.snapshot_lon! }))
+		];
+		if (locatedStops.length === 0 || routePoints.length < 2) {
+			return fail(400, { error: 'Need at least two route points with coordinates.' });
 		}
 		const centroidLat =
-			locatedStops.reduce((sum, s) => sum + s.snapshot_lat!, 0) / locatedStops.length;
+			routePoints.reduce((sum, point) => sum + point.lat, 0) / routePoints.length;
 		const centroidLon =
-			locatedStops.reduce((sum, s) => sum + s.snapshot_lon!, 0) / locatedStops.length;
+			routePoints.reduce((sum, point) => sum + point.lon, 0) / routePoints.length;
 
 		const itinerary = await listItinerary(tripId);
 		const internal = itinerary

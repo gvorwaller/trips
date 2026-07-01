@@ -664,8 +664,9 @@
 		return locatedCount(stops) >= (anchor ? 2 : 3);
 	}
 
-	function canSuggestStops(stops: DayPlanStop[]): boolean {
-		return locatedCount(savedRouteStops(stops)) >= 2;
+	function canSuggestStops(stops: DayPlanStop[], anchor: PlanAnchor | null): boolean {
+		const routePointCount = locatedCount(savedRouteStops(stops)) + (anchor ? 1 : 0);
+		return stops.length > 0 && routePointCount >= 2;
 	}
 
 	function orderSavedStops(stops: DayPlanStop[], orderedIds: number[]): DayPlanStop[] {
@@ -1805,7 +1806,7 @@
 										<button
 											class="btn small"
 											type="button"
-											disabled={suggestBusy === plan.id || !canSuggestStops(stops)}
+											disabled={suggestBusy === plan.id || !canSuggestStops(stops, anchor)}
 											onclick={() => fetchSuggestions(plan.id)}
 										>
 											{suggestBusy === plan.id ? 'Loading...' : 'Suggest stops'}
