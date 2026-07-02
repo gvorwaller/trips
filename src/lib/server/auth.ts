@@ -20,26 +20,20 @@ export async function verifyPassword(hash: string, password: string): Promise<bo
 	}
 }
 
+/**
+ * admin — full data-owning account + user management in /settings.
+ * user  — full data-owning account, no user management.
+ * viewer — read-only view of one admin/user account's trips (views_user_id).
+ */
+export type Role = 'admin' | 'user' | 'viewer';
+
 export interface DbUser {
 	id: number;
 	username: string;
 	display_name: string;
-	role: 'owner' | 'viewer';
+	role: Role;
 	password_hash: string;
 	last_login_at: string | null;
-}
-
-let cachedOwnerId: number | null = null;
-
-/** The single owner whose trips the app surfaces. Cached (never changes). */
-export async function getOwnerId(): Promise<number> {
-	if (cachedOwnerId != null) return cachedOwnerId;
-	const r = await query<{ id: number }>(
-		"SELECT id FROM users WHERE role = 'owner' ORDER BY id LIMIT 1"
-	);
-	if (!r.rows[0]) throw new Error('No owner user exists');
-	cachedOwnerId = r.rows[0].id;
-	return cachedOwnerId;
 }
 
 export async function findUserByUsername(username: string): Promise<DbUser | null> {

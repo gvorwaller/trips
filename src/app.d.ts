@@ -5,12 +5,13 @@ declare global {
 			user?: {
 				id: number;
 				username: string;
-				role: 'owner' | 'viewer';
+				role: 'admin' | 'user' | 'viewer';
 				display_name: string;
+				views_user_id: number | null;
 			};
-			// The owner whose trips every page reads. For the owner this is their
-			// own id; for a viewer it points at the owner so they see the owner's
-			// trips read-only (except packing check-off).
+			// The account whose trips this session reads: self for admin/user,
+			// the linked account (views_user_id) for viewers, who see it
+			// read-only (except packing check-off / day-plan visited).
 			ownerId?: number;
 		}
 	}

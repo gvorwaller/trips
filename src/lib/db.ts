@@ -53,6 +53,14 @@ export async function withTransaction<T>(fn: (client: pg.PoolClient) => Promise<
 	}
 }
 
+/** Close the pool so short-lived processes (the dbtest suite) exit cleanly. */
+export async function closePool(): Promise<void> {
+	if (pool) {
+		await pool.end();
+		pool = undefined;
+	}
+}
+
 export async function dbHealthCheck(): Promise<boolean> {
 	try {
 		const r = await query<{ one: number }>('SELECT 1 AS one');

@@ -26,7 +26,7 @@ The entire stack, conventions, and ops are deliberately copied from `/Users/gayl
 - **CSS**: component-scoped `<style>` blocks only. No Tailwind/utility frameworks. Base on birds `docs/mockups/mockup.css` (mobile-first; 640px + 1024px breakpoints only; fixed bottom nav <640px; ≥48px tap targets; ≥16px input font; WCAG AAA 7:1 contrast).
 - **No toast notifications** — use modal confirmation dialogs.
 - **DB**: direct `pg` (node-postgres), no ORM. `Pool` + `query<T>()` + `withTransaction` (copy `birds/src/lib/db.ts`). Raw SQL migrations in `backend/db/migrations/NNNN_*.sql`, applied only via `backend/db/migrate_pg.sh` — never inline DDL, never raw `psql -f`.
-- **Auth**: argon2 + session cookie + `hooks.server.ts` gating (copy birds). Two roles: `owner` (full access) and `viewer` (read-only; blocks all non-GET/HEAD mutations except logout). Test viewer-mode leaks aggressively.
+- **Auth**: argon2 + session cookie + `hooks.server.ts` gating (copy birds). Three roles since td-d3af9d (multi-user, 2026-07-02; see `docs/2026-07-02-multiuser-plan.md`): `admin` (own data + Users panel in /settings), `user` (own data), `viewer` (read-only view of one account via `users.views_user_id`; blocks all non-GET/HEAD mutations except logout and the two check-off PATCHes). Data is hard-partitioned per account through `locals.ownerId`. Test cross-account and viewer-mode leaks aggressively (`npm run test:db` is the real-DB isolation suite).
 - PWA, PM2 deploy via `ecosystem.config.cjs`, `/api/health` returning `{ db: "ok", ... }` (only `db == "ok"` gates deploys).
 
 ### Infrastructure — distinct from siblings (don't collide)

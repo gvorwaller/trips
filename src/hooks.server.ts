@@ -1,7 +1,6 @@
 import type { Handle } from '@sveltejs/kit';
 import { redirect } from '@sveltejs/kit';
 import { SESSION_COOKIE_NAME, validateSession } from '$server/session';
-import { getOwnerId } from '$server/auth';
 import { dev } from '$app/environment';
 
 export const SESSION_COOKIE_OPTS = {
@@ -39,7 +38,16 @@ export const handle: Handle = async ({ event, resolve }) => {
 		const user = await validateSession(token);
 		if (user) {
 			event.locals.user = user;
-			event.locals.ownerId = await getOwnerId();
+			if (user.role === 'viewer') {
+				// The users_views_matches_role constraint makes a NULL link
+				// impossible for a viewer; guard anyway rather than leak.
+				if (user.views_user_id == null) {
+					return new Response('Viewer account has no linked user.', { status: 500 });
+				}
+				event.locals.ownerId = user.views_user_id;
+			} else {
+				event.locals.ownerId = user.id;
+			}
 		} else {
 			event.cookies.delete(SESSION_COOKIE_NAME, { path: '/' });
 		}

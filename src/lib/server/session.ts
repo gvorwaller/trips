@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { query } from '$lib/db';
+import type { Role } from '$server/auth';
 
 export const SESSION_COOKIE_NAME = 'trips_session';
 export const SESSION_TTL_DAYS = 30;
@@ -23,8 +24,10 @@ export async function createSession(userId: number): Promise<string> {
 export interface SessionUser {
 	id: number;
 	username: string;
-	role: 'owner' | 'viewer';
+	role: Role;
 	display_name: string;
+	/** For viewers: the admin/user account whose trips they read. NULL otherwise. */
+	views_user_id: number | null;
 }
 
 export async function validateSession(token: string): Promise<SessionUser | null> {
@@ -35,9 +38,10 @@ export async function validateSession(token: string): Promise<SessionUser | null
 		username: string;
 		role: string;
 		display_name: string;
+		views_user_id: number | null;
 	}>(
 		`SELECT s.id AS sid, s.expires_at,
-		        u.id AS uid, u.username, u.role, u.display_name
+		        u.id AS uid, u.username, u.role, u.display_name, u.views_user_id
 		   FROM sessions s
 		   JOIN users u ON u.id = s.user_id
 		  WHERE s.id = $1`,
@@ -59,8 +63,9 @@ export async function validateSession(token: string): Promise<SessionUser | null
 	return {
 		id: row.uid,
 		username: row.username,
-		role: row.role as 'owner' | 'viewer',
-		display_name: row.display_name
+		role: row.role as Role,
+		display_name: row.display_name,
+		views_user_id: row.views_user_id
 	};
 }
 
@@ -70,9 +75,9 @@ export async function destroySession(token: string): Promise<void> {
 
 /**
  * Invalidate a user's sessions after a password change. Pass `exceptToken` to
- * keep the caller's own session alive (used when the owner changes their own
- * password); omit it to force the user off everywhere (used when the owner
- * resets the viewer's password).
+ * keep the caller's own session alive (used when someone changes their own
+ * password); omit it to force the user off everywhere (used when an admin
+ * resets another account's password).
  */
 export async function destroyUserSessions(userId: number, exceptToken?: string): Promise<void> {
 	if (exceptToken) {

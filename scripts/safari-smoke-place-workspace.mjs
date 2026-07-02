@@ -22,10 +22,17 @@ import safari from 'selenium-webdriver/safari.js';
 
 const QA_USERNAME = 'safari_qa';
 const QA_PASSWORD = 'safari-qa-smoke-test';
-// A real, stable Google-resolvable point (used elsewhere in this app's manual QA) — reverse-geocodes
-// to a fixed street address, which is what the resolve-candidate assertions check against.
-const COORDS_ITEM = { lat: 44.5419, lon: -68.4246 };
-const EXPECTED_RESOLVED_SUBSTRING = 'Ellsworth, ME';
+// The resolve-candidate flow searches Google by the ITEM'S TITLE, biased to its
+// pin — so the fixture title must be a real, stable POI at these coordinates or
+// the test is at Google's mercy. (The original junk title "Coords, no Google
+// place" nondeterministically returned a locality fallback one day and
+// ZERO_RESULTS the next — bit us on 2026-07-02.)
+const COORDS_ITEM = {
+	title: 'Downeast Scenic Railroad',
+	lat: 44.5543,
+	lon: -68.3797
+};
+const EXPECTED_RESOLVED_SUBSTRING = 'Downeast Scenic Railroad';
 
 function usage() {
 	console.log(`Usage:
@@ -101,24 +108,17 @@ async function provisionFixtures(pool) {
 		timeCost: 2,
 		parallelism: 1
 	});
-	await pool.query(
+	const userRes = await pool.query(
 		`INSERT INTO users (username, display_name, password_hash, role)
-		 VALUES ($1, $2, $3, 'owner')
-		 ON CONFLICT (username) DO UPDATE SET password_hash = EXCLUDED.password_hash`,
+		 VALUES ($1, $2, $3, 'user')
+		 ON CONFLICT (username) DO UPDATE
+		   SET password_hash = EXCLUDED.password_hash, role = EXCLUDED.role
+		 RETURNING id`,
 		[QA_USERNAME, 'Safari QA', hash]
 	);
-
-	// This app currently has a single global "owner" — src/lib/server/auth.ts
-	// getOwnerId() resolves to the first owner-role user by id, cached for the
-	// server process's lifetime. Logging in as any owner-role user (including
-	// the fixture above) gets a session that can see that owner's trips, but a
-	// *new* trip must be owned by the resolved canonical owner id, not by the
-	// fixture user's own id, or the workspace route 404s (owner_id mismatch).
-	const ownerRes = await pool.query(
-		`SELECT id FROM users WHERE role = 'owner' ORDER BY id LIMIT 1`
-	);
-	if (!ownerRes.rows[0]) throw new Error('No owner-role user exists in this database yet.');
-	const ownerId = ownerRes.rows[0].id;
+	// Multi-user: each account owns its own trips, so the fixture trip is
+	// simply owned by the fixture user.
+	const ownerId = userRes.rows[0].id;
 
 	const tripRes = await pool.query(
 		`INSERT INTO trips (owner_id, name) VALUES ($1, 'Safari smoke test trip') RETURNING id`,
@@ -128,8 +128,8 @@ async function provisionFixtures(pool) {
 
 	const coordsItemRes = await pool.query(
 		`INSERT INTO itinerary_items (trip_id, item_type, title, lat, lon)
-		 VALUES ($1, 'place', 'Coords, no Google place', $2, $3) RETURNING id`,
-		[tripId, COORDS_ITEM.lat, COORDS_ITEM.lon]
+		 VALUES ($1, 'place', $2, $3, $4) RETURNING id`,
+		[tripId, COORDS_ITEM.title, COORDS_ITEM.lat, COORDS_ITEM.lon]
 	);
 	const noCoordsItemRes = await pool.query(
 		`INSERT INTO itinerary_items (trip_id, item_type, title) VALUES ($1, 'place', 'No location set') RETURNING id`,

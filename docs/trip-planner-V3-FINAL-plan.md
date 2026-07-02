@@ -5,6 +5,13 @@
 **Status**: FINAL. This document supersedes `grok-trip-planner-V1-plan.md` and `codex-trip-planner-V2-plan.md` (both retained for history). Implementation begins from this plan.
 **Lineage**: Grok V1 (product vision) → Codex V2 (risk-reduction, schema discipline) → Claude V3 (verified-against-source tightening + user-approved UX layer).
 
+> **Amendment (2026-07-02, td-d3af9d — multi-user):** roles are now `admin` / `user` / `viewer`
+> (was `owner` + `viewer`), each admin/user account owns its own fully-partitioned trips, and
+> viewers are linked to one account via `users.views_user_id`. This supersedes this document's
+> "owner + read-only wife viewer" framing and the V1 "no multi-user" non-goal. Design and phases:
+> `docs/2026-07-02-multiuser-plan.md`. The rest of this document is retained unchanged as the
+> locked V1 plan.
+
 ---
 
 ## 1. Product center

@@ -3,6 +3,7 @@
  * Backs /api/geocode so the MapPicker can search place names and reverse-geocode
  * map taps. The user never types raw coordinates.
  */
+import { createHash } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import { query as dbQuery } from '$lib/db';
 
@@ -102,7 +103,13 @@ export async function placesTextSearchCached(
 	query: string,
 	opts: { lat?: number; lng?: number; radiusM?: number } = {}
 ): Promise<GeoResult | null> {
-	const key = `place-text:${opts.lat?.toFixed(3)}:${opts.lng?.toFixed(3)}:${opts.radiusM ?? 500}:${query}`;
+	// The query is a trip item title — hash it so user-written text never lands
+	// in api_cache, while identical queries still share one row across users.
+	// api_cache stays deliberately shared between accounts: every other key is
+	// id- or coordinate-based and payloads are Google/weather responses, so
+	// sharing is an efficiency win, not a leak.
+	const queryHash = createHash('sha256').update(query).digest('hex').slice(0, 16);
+	const key = `place-text:${opts.lat?.toFixed(3)}:${opts.lng?.toFixed(3)}:${opts.radiusM ?? 500}:${queryHash}`;
 	const cached = await dbQuery<{ payload: GeoResult | null; fetched_at: string }>(
 		'SELECT payload, fetched_at FROM api_cache WHERE cache_key = $1',
 		[key]
