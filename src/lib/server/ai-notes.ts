@@ -1,9 +1,7 @@
-import { env } from '$env/dynamic/private';
+import { callClaude, AnthropicError } from './anthropic-client';
 import type { WeatherResult } from '$server/weather';
 
-const MODEL = 'claude-sonnet-4-6';
-
-export class AiNotesError extends Error {}
+export { AnthropicError as AiNotesError };
 
 interface StopInput {
 	id: number;
@@ -37,8 +35,6 @@ export async function generateTripNotes(input: {
 	weather: WeatherResult | null;
 	date: string | null;
 }): Promise<Record<number, string>> {
-	const apiKey = env.ANTHROPIC_API_KEY;
-	if (!apiKey) throw new AiNotesError('AI notes are not configured (no API key set).');
 	if (input.stops.length === 0) return {};
 
 	const stopsText = input.stops
@@ -58,39 +54,7 @@ export async function generateTripNotes(input: {
 		`Respond with ONLY a JSON array, one object per stop in the same order: ` +
 		`[{"n": <stop number>, "note": "<note>"}]. No text outside the JSON.`;
 
-	let res: Response;
-	try {
-		res = await fetch('https://api.anthropic.com/v1/messages', {
-			method: 'POST',
-			headers: {
-				'x-api-key': apiKey,
-				'anthropic-version': '2023-06-01',
-				'content-type': 'application/json'
-			},
-			body: JSON.stringify({
-				model: MODEL,
-				max_tokens: 1500,
-				system: SYSTEM,
-				messages: [{ role: 'user', content: userText }]
-			}),
-			signal: AbortSignal.timeout(30000)
-		});
-	} catch {
-		throw new AiNotesError('Could not reach the AI service — try again shortly.');
-	}
-
-	if (res.status === 401) throw new AiNotesError('The AI API key is missing or invalid.');
-	if (res.status === 429) throw new AiNotesError('AI service is rate-limited — try again shortly.');
-	if (!res.ok) throw new AiNotesError(`AI service error (${res.status}).`);
-
-	/* eslint-disable @typescript-eslint/no-explicit-any */
-	const data = (await res.json()) as any;
-	const text: string = (data.content ?? [])
-		.filter((b: any) => b.type === 'text')
-		.map((b: any) => b.text)
-		.join('')
-		.trim();
-	/* eslint-enable @typescript-eslint/no-explicit-any */
+	const text = await callClaude({ system: SYSTEM, userText, maxTokens: 1500 });
 
 	let arr: { n: number; note: string }[];
 	try {
@@ -99,7 +63,7 @@ export async function generateTripNotes(input: {
 		if (start < 0 || end < 0) throw new Error('no array');
 		arr = JSON.parse(text.slice(start, end + 1));
 	} catch {
-		throw new AiNotesError('The AI response could not be read — try again.');
+		throw new AnthropicError('The AI response could not be read — try again.');
 	}
 
 	const out: Record<number, string> = {};

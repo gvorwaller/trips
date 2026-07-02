@@ -60,7 +60,7 @@ interface GooglePlacesTextResponse {
 	}[];
 }
 
-async function placesTextSearch(
+export async function placesTextSearch(
 	query: string,
 	opts: { lat?: number; lng?: number; radiusM?: number } = {}
 ): Promise<GeoResult | null> {
@@ -91,6 +91,34 @@ async function placesTextSearch(
 		place_id: top.place_id ?? null,
 		bounds: top.geometry.viewport ?? null
 	};
+}
+
+/**
+ * Cached wrapper around placesTextSearch, mirroring placesNearbyCached below —
+ * used by the place workspace's resolve-candidate flow, which otherwise ran
+ * this uncached on every page load for any coordinate-only, unlinked item.
+ */
+export async function placesTextSearchCached(
+	query: string,
+	opts: { lat?: number; lng?: number; radiusM?: number } = {}
+): Promise<GeoResult | null> {
+	const key = `place-text:${opts.lat?.toFixed(3)}:${opts.lng?.toFixed(3)}:${opts.radiusM ?? 500}:${query}`;
+	const cached = await dbQuery<{ payload: GeoResult | null; fetched_at: string }>(
+		'SELECT payload, fetched_at FROM api_cache WHERE cache_key = $1',
+		[key]
+	);
+	const row = cached.rows[0];
+	const fresh = row && Date.now() - new Date(row.fetched_at).getTime() < 60 * 60_000;
+	if (row && fresh) return row.payload;
+
+	const result = await placesTextSearch(query, opts);
+	await dbQuery(
+		`INSERT INTO api_cache (cache_key, payload, fetched_at)
+		 VALUES ($1, $2, NOW())
+		 ON CONFLICT (cache_key) DO UPDATE SET payload = $2, fetched_at = NOW()`,
+		[key, JSON.stringify(result)]
+	);
+	return result;
 }
 
 export async function geocodePlace(

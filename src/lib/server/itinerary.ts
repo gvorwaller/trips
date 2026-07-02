@@ -166,6 +166,20 @@ export async function setLocation(
 	return (res.rowCount ?? 0) > 0;
 }
 
+/**
+ * Attach a resolved Google place_id without touching coordinates or the
+ * Apple Maps id — used when the place workspace resolves a Google match for
+ * an item that already has coordinates (e.g. from an Apple Maps import or a
+ * manual pin) but no Google place_id of its own.
+ */
+export async function setPlaceId(tripId: number, id: number, placeId: string): Promise<boolean> {
+	const res = await query(
+		`UPDATE itinerary_items SET place_id = $3, updated_at = NOW() WHERE id = $1 AND trip_id = $2`,
+		[id, tripId, placeId]
+	);
+	return (res.rowCount ?? 0) > 0;
+}
+
 export async function clearLocation(tripId: number, id: number): Promise<boolean> {
 	const res = await query(
 		`UPDATE itinerary_items

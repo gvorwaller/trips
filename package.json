@@ -18,6 +18,7 @@
 		"test:db:stop": "./scripts/test-db-stop.sh",
 		"test:db:reset": "./scripts/test-db-reset.sh",
 		"test:db:migrate": "./scripts/test-db-migrate.sh",
+		"test:safari:place-workspace": "node --env-file=.env.test scripts/safari-smoke-place-workspace.mjs",
 		"format": "prettier --write .",
 		"lint": "prettier --check ."
 	},
@@ -29,6 +30,7 @@
 		"@types/pg": "^8.11.10",
 		"prettier": "^3.4.2",
 		"prettier-plugin-svelte": "^3.3.3",
+		"selenium-webdriver": "^4.45.0",
 		"svelte": "^5.17.3",
 		"svelte-check": "^4.1.4",
 		"tslib": "^2.8.1",
