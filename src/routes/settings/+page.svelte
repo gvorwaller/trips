@@ -178,12 +178,15 @@
 		>
 			<label class="field">
 				<span>Username</span>
+				<!-- Uppercase allowed here because the server lowercases before
+				     validating — rejecting "Caleb" client-side just confuses. -->
 				<input
 					name="username"
 					autocapitalize="none"
 					autocorrect="off"
 					spellcheck="false"
-					pattern="[a-z0-9._\-]{'{'}2,60{'}'}"
+					pattern="[A-Za-z0-9._\-]{'{'}2,60{'}'}"
+					title="2–60 characters: letters, numbers, . _ - (stored lowercase)"
 					placeholder="e.g. caleb"
 					required
 				/>
