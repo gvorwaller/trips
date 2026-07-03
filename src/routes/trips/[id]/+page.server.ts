@@ -248,8 +248,8 @@ function asOp(v: FormDataEntryValue | null): TreeOp {
 	throw error(400, 'Invalid move');
 }
 
-function duplicateStopFailure(err: unknown) {
-	if (err instanceof DuplicateDayPlanStopError) return fail(400, { error: err.message });
+function duplicateStopFailure(err: unknown, data: Record<string, unknown> = {}) {
+	if (err instanceof DuplicateDayPlanStopError) return fail(400, { ...data, error: err.message });
 	throw err;
 }
 
@@ -654,15 +654,16 @@ export const actions: Actions = {
 		const { ownerId, tripId } = ctx(locals, params);
 		await ownTrip(ownerId, tripId);
 		const form = await request.formData();
+		const planId = parseId(form.get('plan_id'));
 		try {
-			const stopId = await addStop(tripId, parseId(form.get('plan_id')), {
+			const stopId = await addStop(tripId, planId, {
 				itinerary_item_id: parseId(form.get('itinerary_item_id')),
 				notes: cleanText(form.get('notes'))
 			});
 			if (stopId === null) throw error(404, 'Day plan or place not found');
 			return { ok: true, stopId };
 		} catch (err) {
-			return duplicateStopFailure(err);
+			return duplicateStopFailure(err, { plan_id: planId });
 		}
 	},
 

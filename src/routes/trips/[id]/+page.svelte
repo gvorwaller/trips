@@ -26,7 +26,14 @@
 	} from '$lib/route';
 	import type { PageData } from './$types';
 
-	let { data }: { data: PageData } = $props();
+	type ActionData = {
+		ok?: boolean;
+		orderedStopIds?: number[];
+		error?: string;
+		plan_id?: number;
+	};
+
+	let { data, form }: { data: PageData; form?: ActionData } = $props();
 	const isViewer = $derived(data.user?.role === 'viewer');
 	const MAPS_API_KEY = env.PUBLIC_GOOGLE_MAPS_API_KEY ?? '';
 	let selectedPin = $state<number | null>(null);
@@ -416,6 +423,7 @@
 	let dayPlanSearch = $state('');
 	let dayPlanRouteBusy = $state<number | 'builder' | null>(null);
 	let dayPlanRouteStatus = $state<Record<number, string>>({});
+	let dayPlanAddStopError = $state<Record<number, string>>({});
 	let savedPlanAnchors = $state<Record<number, string>>({});
 	let builderAnchor = $state('none');
 	let dayPlanBuilderError = $state('');
@@ -735,7 +743,13 @@
 		dayPlanRouteStatus = { ...dayPlanRouteStatus, [planId]: message };
 	}
 
-	type ActionData = { ok?: boolean; orderedStopIds?: number[]; error?: string };
+	function setAddStopError(planId: number, message: string) {
+		dayPlanAddStopError = { ...dayPlanAddStopError, [planId]: message };
+	}
+
+	function addStopError(planId: number): string {
+		return dayPlanAddStopError[planId] || (form?.plan_id === planId ? form.error : '') || '';
+	}
 
 	async function postAction(action: string, fd: FormData): Promise<ActionData> {
 		const response = await fetch(`?/${action}`, {
@@ -1916,11 +1930,11 @@
 								method="POST"
 								action="?/dayplan-add-stop"
 								use:enhance={() => {
-									setRouteStatus(plan.id, '');
+									setAddStopError(plan.id, '');
 									return async ({ result, update }) => {
 										await update({ reset: result.type === 'success' });
 										if (result.type === 'failure') {
-											setRouteStatus(
+											setAddStopError(
 												plan.id,
 												(result.data as { error?: string })?.error ?? 'Could not add stop.'
 											);
@@ -1945,6 +1959,10 @@
 								<input name="notes" placeholder="Stop note" />
 								<button class="btn small" type="submit">Add stop</button>
 							</form>
+							{@const addStopMessage = addStopError(plan.id)}
+							{#if addStopMessage}
+								<p class="field-error add-stop-error" role="alert">{addStopMessage}</p>
+							{/if}
 						{/if}
 					</article>
 				{/each}
@@ -3992,6 +4010,14 @@
 	.add-row textarea[name='notes'] {
 		flex: 1 0 100%;
 		min-height: 64px;
+	}
+	.field-error {
+		color: var(--danger);
+		font-size: 0.85rem;
+		margin: 4px 0 0;
+	}
+	.add-stop-error {
+		margin-top: 6px;
 	}
 	.qty {
 		width: 64px;
