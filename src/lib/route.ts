@@ -38,6 +38,19 @@ function missingStops(stops: RouteStop[]): RouteStop[] {
 	return stops.filter((s) => typeof s.lat !== 'number' || typeof s.lon !== 'number');
 }
 
+function assertNoDuplicateRoutePoints(
+	points: Array<{ lat: number; lon: number }>,
+	message = 'Remove duplicate stops before calculating directions.'
+): void {
+	for (let i = 0; i < points.length; i++) {
+		for (let j = i + 1; j < points.length; j++) {
+			if (haversineKm(points[i].lat, points[i].lon, points[j].lat, points[j].lon) <= 0.03) {
+				throw new Error(message);
+			}
+		}
+	}
+}
+
 function requireAllLocated(stops: RouteStop[]): Array<RouteStop & { lat: number; lon: number }> {
 	const located = locatedStops(stops);
 	if (located.length !== stops.length) {
@@ -77,8 +90,11 @@ export async function computeLegDistances(
 ): Promise<DrivingLeg[]> {
 	const located = requireAllLocated(stops);
 	if (located.length < (anchor ? 1 : 2)) {
-		throw new Error(anchor ? 'Need at least 1 stop with coordinates.' : 'Need at least 2 stops with coordinates.');
+		throw new Error(
+			anchor ? 'Need at least 1 stop with coordinates.' : 'Need at least 2 stops with coordinates.'
+		);
 	}
+	assertNoDuplicateRoutePoints(anchor ? [anchor, ...located] : located);
 
 	const service = await directionsService(apiKey);
 	const origin = anchor ?? located[0];
@@ -127,6 +143,10 @@ export async function optimizeDrivingRoute(
 				: 'Need at least 3 stops with coordinates to optimize.'
 		);
 	}
+	assertNoDuplicateRoutePoints(
+		opts.anchor ? [opts.anchor, ...located] : located,
+		'Remove duplicate stops before optimizing the route.'
+	);
 
 	const service = await directionsService(apiKey);
 	const fixedAnchor = opts.anchor ?? { lat: located[0].lat, lon: located[0].lon };

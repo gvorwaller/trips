@@ -72,6 +72,7 @@ import {
 	bulkUpdateAiNotes,
 	optimizeStopOrder,
 	setDayPlanAnchor,
+	DuplicateDayPlanStopError,
 	type AnchorInput,
 	type StopInput
 } from '$server/dayplans';
@@ -245,6 +246,11 @@ function asOp(v: FormDataEntryValue | null): TreeOp {
 	const s = (v ?? '').toString();
 	if (s === 'move-up' || s === 'move-down' || s === 'indent' || s === 'outdent') return s;
 	throw error(400, 'Invalid move');
+}
+
+function duplicateStopFailure(err: unknown) {
+	if (err instanceof DuplicateDayPlanStopError) return fail(400, { error: err.message });
+	throw err;
 }
 
 export const load: PageServerLoad = async ({ params, locals }) => {
@@ -594,23 +600,31 @@ export const actions: Actions = {
 		const title = (form.get('title') ?? '').toString().trim();
 		if (!title) return fail(400, { error: 'Title is required.' });
 		const stops = parseStopInputs(form.get('stops')?.toString());
-		const planId = await createDayPlan(tripId, {
-			title: title.slice(0, 300),
-			notes: cleanText(form.get('notes')),
-			optional_date: optDate(form.get('optional_date')),
-			anchor: parseAnchor(form),
-			stops
-		});
-		return { ok: true, planId };
+		try {
+			const planId = await createDayPlan(tripId, {
+				title: title.slice(0, 300),
+				notes: cleanText(form.get('notes')),
+				optional_date: optDate(form.get('optional_date')),
+				anchor: parseAnchor(form),
+				stops
+			});
+			return { ok: true, planId };
+		} catch (err) {
+			return duplicateStopFailure(err);
+		}
 	},
 
 	'dayplan-set-anchor': async ({ params, request, locals }) => {
 		const { ownerId, tripId } = ctx(locals, params);
 		await ownTrip(ownerId, tripId);
 		const form = await request.formData();
-		const ok = await setDayPlanAnchor(tripId, parseId(form.get('plan_id')), parseAnchor(form));
-		if (!ok) return fail(400, { error: 'Day plan not found.' });
-		return { ok: true };
+		try {
+			const ok = await setDayPlanAnchor(tripId, parseId(form.get('plan_id')), parseAnchor(form));
+			if (!ok) return fail(400, { error: 'Day plan not found.' });
+			return { ok: true };
+		} catch (err) {
+			return duplicateStopFailure(err);
+		}
 	},
 
 	'dayplan-edit': async ({ params, request, locals }) => {
@@ -640,12 +654,16 @@ export const actions: Actions = {
 		const { ownerId, tripId } = ctx(locals, params);
 		await ownTrip(ownerId, tripId);
 		const form = await request.formData();
-		const stopId = await addStop(tripId, parseId(form.get('plan_id')), {
-			itinerary_item_id: parseId(form.get('itinerary_item_id')),
-			notes: cleanText(form.get('notes'))
-		});
-		if (stopId === null) throw error(404, 'Day plan or place not found');
-		return { ok: true, stopId };
+		try {
+			const stopId = await addStop(tripId, parseId(form.get('plan_id')), {
+				itinerary_item_id: parseId(form.get('itinerary_item_id')),
+				notes: cleanText(form.get('notes'))
+			});
+			if (stopId === null) throw error(404, 'Day plan or place not found');
+			return { ok: true, stopId };
+		} catch (err) {
+			return duplicateStopFailure(err);
+		}
 	},
 
 	'dayplan-remove-stop': async ({ params, request, locals }) => {
@@ -778,10 +796,8 @@ export const actions: Actions = {
 		if (locatedStops.length === 0 || routePoints.length < 2) {
 			return fail(400, { error: 'Need at least two route points with coordinates.' });
 		}
-		const centroidLat =
-			routePoints.reduce((sum, point) => sum + point.lat, 0) / routePoints.length;
-		const centroidLon =
-			routePoints.reduce((sum, point) => sum + point.lon, 0) / routePoints.length;
+		const centroidLat = routePoints.reduce((sum, point) => sum + point.lat, 0) / routePoints.length;
+		const centroidLon = routePoints.reduce((sum, point) => sum + point.lon, 0) / routePoints.length;
 
 		const itinerary = await listItinerary(tripId);
 		const internal = itinerary
@@ -867,6 +883,7 @@ export const actions: Actions = {
 		}
 
 		let itemId: number;
+		let createdItem = false;
 		if (existingId) {
 			itemId = existingId;
 		} else {
@@ -879,14 +896,22 @@ export const actions: Actions = {
 			if (hasCoords) {
 				await setLocation(tripId, itemId, lat, lng, placeId);
 			}
+			createdItem = true;
 		}
 
-		const stopId = await addStop(tripId, planId, {
-			itinerary_item_id: itemId,
-			notes: null
-		});
-		if (stopId === null) return fail(400, { error: 'Could not add stop.' });
-		return { ok: true, itemId, stopId };
+		try {
+			const stopId = await addStop(tripId, planId, {
+				itinerary_item_id: itemId,
+				notes: null
+			});
+			if (stopId === null) return fail(400, { error: 'Could not add stop.' });
+			return { ok: true, itemId, stopId };
+		} catch (err) {
+			if (createdItem && err instanceof DuplicateDayPlanStopError) {
+				await deleteItem(tripId, itemId);
+			}
+			return duplicateStopFailure(err);
+		}
 	},
 
 	// ── Packing lists ──────────────────────────────────────

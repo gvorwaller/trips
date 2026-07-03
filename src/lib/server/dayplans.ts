@@ -61,11 +61,136 @@ export interface OptimizeOrigin {
 	lon: number;
 }
 
+const DUPLICATE_COORD_KM = 0.03;
+
+export class DuplicateDayPlanStopError extends Error {
+	constructor(title: string) {
+		super(`${title} is already in this route.`);
+		this.name = 'DuplicateDayPlanStopError';
+	}
+}
+
 const PLAN_SELECT = `id, trip_id, title, notes,
 	to_char(optional_date, 'YYYY-MM-DD') AS optional_date,
 	anchor_source, anchor_title, anchor_lat, anchor_lon,
 	created_at::text AS created_at,
 	updated_at::text AS updated_at`;
+
+interface LocationIdentity {
+	title: string;
+	itinerary_item_id: number | null;
+	place_id: string | null;
+	lat: number | null;
+	lon: number | null;
+}
+
+function cleanPlaceId(placeId: string | null): string | null {
+	const s = placeId?.trim();
+	return s ? s : null;
+}
+
+function sameRouteLocation(a: LocationIdentity, b: LocationIdentity): boolean {
+	if (
+		a.itinerary_item_id !== null &&
+		b.itinerary_item_id !== null &&
+		a.itinerary_item_id === b.itinerary_item_id
+	) {
+		return true;
+	}
+	const aPlace = cleanPlaceId(a.place_id);
+	const bPlace = cleanPlaceId(b.place_id);
+	if (aPlace && bPlace) return aPlace === bPlace;
+	if (
+		typeof a.lat === 'number' &&
+		typeof a.lon === 'number' &&
+		typeof b.lat === 'number' &&
+		typeof b.lon === 'number'
+	) {
+		return haversineKm(a.lat, a.lon, b.lat, b.lon) <= DUPLICATE_COORD_KM;
+	}
+	return false;
+}
+
+async function assertLocationIsNewToPlan(
+	client: Pick<pg.PoolClient, 'query'>,
+	planId: number,
+	candidate: LocationIdentity
+): Promise<void> {
+	const anchor = await client.query<{
+		anchor_source: string | null;
+		anchor_title: string | null;
+		anchor_lat: number | null;
+		anchor_lon: number | null;
+	}>(
+		`SELECT anchor_source, anchor_title, anchor_lat, anchor_lon
+		   FROM day_plans
+		  WHERE id = $1`,
+		[planId]
+	);
+	const anchorRow = anchor.rows[0];
+	if (anchorRow?.anchor_title && anchorRow.anchor_lat !== null && anchorRow.anchor_lon !== null) {
+		const anchorIdentity: LocationIdentity = {
+			title: anchorRow.anchor_title,
+			itinerary_item_id: anchorRow.anchor_source?.startsWith('place:')
+				? Number(anchorRow.anchor_source.slice(6)) || null
+				: null,
+			place_id: null,
+			lat: anchorRow.anchor_lat,
+			lon: anchorRow.anchor_lon
+		};
+		if (sameRouteLocation(candidate, anchorIdentity)) {
+			throw new DuplicateDayPlanStopError(anchorIdentity.title);
+		}
+	}
+
+	const existing = await client.query<LocationIdentity>(
+		`SELECT itinerary_item_id,
+		        snapshot_title AS title,
+		        snapshot_place_id AS place_id,
+		        snapshot_lat AS lat,
+		        snapshot_lon AS lon
+		   FROM day_plan_stops
+		  WHERE day_plan_id = $1`,
+		[planId]
+	);
+	for (const stop of existing.rows) {
+		if (sameRouteLocation(candidate, stop)) {
+			throw new DuplicateDayPlanStopError(stop.title);
+		}
+	}
+}
+
+async function assertAnchorIsNewToPlan(
+	client: Pick<pg.PoolClient, 'query'>,
+	planId: number,
+	anchor: AnchorInput | null
+): Promise<void> {
+	if (!anchor) return;
+	const candidate: LocationIdentity = {
+		title: anchor.title,
+		itinerary_item_id: anchor.source.startsWith('place:')
+			? Number(anchor.source.slice(6)) || null
+			: null,
+		place_id: null,
+		lat: anchor.lat,
+		lon: anchor.lon
+	};
+	const existing = await client.query<LocationIdentity>(
+		`SELECT itinerary_item_id,
+		        snapshot_title AS title,
+		        snapshot_place_id AS place_id,
+		        snapshot_lat AS lat,
+		        snapshot_lon AS lon
+		   FROM day_plan_stops
+		  WHERE day_plan_id = $1`,
+		[planId]
+	);
+	for (const stop of existing.rows) {
+		if (sameRouteLocation(candidate, stop)) {
+			throw new DuplicateDayPlanStopError(stop.title);
+		}
+	}
+}
 
 export async function listDayPlans(tripId: number): Promise<DayPlan[]> {
 	const res = await query<DayPlan>(
@@ -119,6 +244,13 @@ async function insertStop(
 	);
 	if (item.rowCount === 0) return null;
 	const i = item.rows[0];
+	await assertLocationIsNewToPlan(client, planId, {
+		title: i.title,
+		itinerary_item_id: i.id,
+		place_id: i.place_id,
+		lat: i.lat,
+		lon: i.lon
+	});
 	const res = await client.query<{ id: number }>(
 		`INSERT INTO day_plan_stops
 		   (day_plan_id, itinerary_item_id, sort_order, notes,
@@ -166,24 +298,28 @@ export async function setDayPlanAnchor(
 	planId: number,
 	anchor: AnchorInput | null
 ): Promise<boolean> {
-	const res = await query(
-		`UPDATE day_plans
-		    SET anchor_source = $3,
-		        anchor_title = $4,
-		        anchor_lat = $5,
-		        anchor_lon = $6,
-		        updated_at = NOW()
-		  WHERE id = $1 AND trip_id = $2`,
-		[
-			planId,
-			tripId,
-			anchor?.source ?? null,
-			anchor?.title ?? null,
-			anchor?.lat ?? null,
-			anchor?.lon ?? null
-		]
-	);
-	return (res.rowCount ?? 0) > 0;
+	return withTransaction(async (client) => {
+		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
+		await assertAnchorIsNewToPlan(client, planId, anchor);
+		const res = await client.query(
+			`UPDATE day_plans
+			    SET anchor_source = $3,
+			        anchor_title = $4,
+			        anchor_lat = $5,
+			        anchor_lon = $6,
+			        updated_at = NOW()
+			  WHERE id = $1 AND trip_id = $2`,
+			[
+				planId,
+				tripId,
+				anchor?.source ?? null,
+				anchor?.title ?? null,
+				anchor?.lat ?? null,
+				anchor?.lon ?? null
+			]
+		);
+		return (res.rowCount ?? 0) > 0;
+	});
 }
 
 export async function updateDayPlan(

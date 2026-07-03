@@ -418,6 +418,7 @@
 	let dayPlanRouteStatus = $state<Record<number, string>>({});
 	let savedPlanAnchors = $state<Record<number, string>>({});
 	let builderAnchor = $state('none');
+	let dayPlanBuilderError = $state('');
 	let builderRouteKm = $state<number | null>(null);
 	let builderRouteMin = $state<number | null>(null);
 	let distanceUnit = $state<DistanceUnit>('mi');
@@ -502,7 +503,10 @@
 		});
 	}
 
-	function anchorOptions(planDate: string | null, currentAnchor: PlanAnchor | null = null): AnchorOption[] {
+	function anchorOptions(
+		planDate: string | null,
+		currentAnchor: PlanAnchor | null = null
+	): AnchorOption[] {
 		const options: AnchorOption[] = [
 			{ value: 'none', label: 'No anchor', title: '', lat: null, lon: null }
 		];
@@ -575,10 +579,9 @@
 	}
 
 	function routePlaces(stops: DayPlanStop[], anchor: PlanAnchor | null): MapPlace[] {
-		return [
-			anchorPlace(anchor),
-			...stops.map(savedStopPlace)
-		].filter((p): p is MapPlace => p !== null);
+		return [anchorPlace(anchor), ...stops.map(savedStopPlace)].filter(
+			(p): p is MapPlace => p !== null
+		);
 	}
 
 	function builderRoutePlaces(): MapPlace[] {
@@ -877,10 +880,11 @@
 				builderRouteMin = optimized.totalMin;
 			} else {
 				orderedIds = straightLineOptimize(routeStops, anchor);
-				builderRouteKm = routeDistanceKm([
-					anchorPlace(anchor),
-					...orderBuilderStops(orderedIds).map(stopPlace)
-				].filter((p): p is MapPlace => p !== null));
+				builderRouteKm = routeDistanceKm(
+					[anchorPlace(anchor), ...orderBuilderStops(orderedIds).map(stopPlace)].filter(
+						(p): p is MapPlace => p !== null
+					)
+				);
 				builderRouteMin = null;
 			}
 			dayPlanStops = orderBuilderStops(orderedIds);
@@ -950,16 +954,24 @@
 		if (sug.source === 'internal' && sug.itinerary_item_id) {
 			fd.set('itinerary_item_id', String(sug.itinerary_item_id));
 		}
-		await postAction('dayplan-add-suggestion', fd);
-		await invalidateAll();
-		if (suggestions[planId]) {
-			const s = suggestions[planId];
-			suggestions = {
-				...suggestions,
-				[planId]: {
-					internal: s.internal.filter((i) => i.name !== sug.name),
-					external: s.external.filter((i) => i.name !== sug.name)
-				}
+		try {
+			aiNotesError = { ...aiNotesError, [planId]: '' };
+			await postAction('dayplan-add-suggestion', fd);
+			await invalidateAll();
+			if (suggestions[planId]) {
+				const s = suggestions[planId];
+				suggestions = {
+					...suggestions,
+					[planId]: {
+						internal: s.internal.filter((i) => i.name !== sug.name),
+						external: s.external.filter((i) => i.name !== sug.name)
+					}
+				};
+			}
+		} catch (err) {
+			aiNotesError = {
+				...aiNotesError,
+				[planId]: err instanceof Error ? err.message : 'Could not add that stop.'
 			};
 		}
 	}
@@ -992,6 +1004,7 @@
 		dayPlanAddPlaceId = '';
 		dayPlanSearch = '';
 		builderAnchor = 'none';
+		dayPlanBuilderError = '';
 		builderRouteKm = null;
 		builderRouteMin = null;
 	}
@@ -1512,7 +1525,12 @@
 					<ol>
 						<li>Click <strong>Build day</strong> to open the builder.</li>
 						<li>Type a <strong>title</strong> (required) and optionally pick a date.</li>
-						<li>Add stops — either click a <strong>group chip</strong> (e.g. "Anniversary & Dining Out") to load all places from that itinerary section at once, or pick individual places from the dropdown and click <strong>Add place</strong>. The "Filter places" box narrows the dropdown by name.</li>
+						<li>
+							Add stops — either click a <strong>group chip</strong> (e.g. "Anniversary & Dining
+							Out") to load all places from that itinerary section at once, or pick individual
+							places from the dropdown and click <strong>Add place</strong>. The "Filter places" box
+							narrows the dropdown by name.
+						</li>
 						<li>Reorder with the arrow buttons, add per-stop notes if you like.</li>
 						<li>Click <strong>Save day</strong> — requires a title and at least one stop.</li>
 					</ol>
@@ -1520,19 +1538,38 @@
 				<details>
 					<summary>After saving: stops, routes, and driving</summary>
 					<ol>
-						<li>Your saved plan shows stops, visited count, and weather (US only, if a date is set).</li>
-						<li>Each stop has a <strong>checkbox</strong> to mark visited and a <strong>Google</strong> link to open it on a map.</li>
-						<li>Use <strong>Calculate distances</strong> to get driving time between each leg via Google Directions.</li>
-						<li>Use <strong>Optimize order</strong> to sort stops by shortest driving route. Pick an anchor (your lodging) from the dropdown first.</li>
-						<li><strong>Open directions</strong> opens the full multi-stop route in Google Maps.</li>
+						<li>
+							Your saved plan shows stops, visited count, and weather (US only, if a date is set).
+						</li>
+						<li>
+							Each stop has a <strong>checkbox</strong> to mark visited and a
+							<strong>Google</strong> link to open it on a map.
+						</li>
+						<li>
+							Use <strong>Calculate distances</strong> to get driving time between each leg via Google
+							Directions.
+						</li>
+						<li>
+							Use <strong>Optimize order</strong> to sort stops by shortest driving route. Pick an anchor
+							(your lodging) from the dropdown first.
+						</li>
+						<li>
+							<strong>Open directions</strong> opens the full multi-stop route in Google Maps.
+						</li>
 						<li>Individual <strong>Leg</strong> links open each segment separately.</li>
 					</ol>
 				</details>
 				<details>
 					<summary>AI tools and suggestions</summary>
 					<ol>
-						<li><strong>Get visit notes</strong> generates 1–3 sentence tips per stop (best time to visit, logistics, weather-aware advice).</li>
-						<li><strong>Suggest stops</strong> finds nearby places — both from your own itinerary and from Google Places (landmarks, museums, etc.).</li>
+						<li>
+							<strong>Get visit notes</strong> generates 1–3 sentence tips per stop (best time to visit,
+							logistics, weather-aware advice).
+						</li>
+						<li>
+							<strong>Suggest stops</strong> finds nearby places — both from your own itinerary and from
+							Google Places (landmarks, museums, etc.).
+						</li>
 						<li>Click <strong>Add</strong> on any suggestion to add it as a stop.</li>
 					</ol>
 				</details>
@@ -1572,7 +1609,8 @@
 										})}
 										-
 									{/if}
-									{#if anchor}Anchor + {/if}{stops.length} stop{stops.length === 1 ? '' : 's'} -
+									{#if anchor}Anchor +
+									{/if}{stops.length} stop{stops.length === 1 ? '' : 's'} -
 									{planProgress(stops)}
 									{#if summary}
 										- {summary}{/if}
@@ -1653,7 +1691,8 @@
 											<button
 												class="btn small"
 												type="button"
-												disabled={!canCalculateDriving(stops, anchor) || dayPlanRouteBusy === plan.id}
+												disabled={!canCalculateDriving(stops, anchor) ||
+													dayPlanRouteBusy === plan.id}
 												onclick={() => calculateSavedDriving(plan.id, stops, anchor)}
 											>
 												{dayPlanRouteBusy === plan.id ? 'Working...' : 'Calculate distances'}
@@ -1738,15 +1777,13 @@
 																type="button"
 																title="move up"
 																disabled={i === 0}
-																onclick={() => reorderSavedStop(plan.id, stop.id, -1)}
-																>↑</button
+																onclick={() => reorderSavedStop(plan.id, stop.id, -1)}>↑</button
 															>
 															<button
 																type="button"
 																title="move down"
 																disabled={i === stops.length - 1}
-																onclick={() => reorderSavedStop(plan.id, stop.id, 1)}
-																>↓</button
+																onclick={() => reorderSavedStop(plan.id, stop.id, 1)}>↓</button
 															>
 															<form
 																method="POST"
@@ -1865,34 +1902,49 @@
 						</details>
 
 						{#if !isViewer}
-								<details class="edit">
-									<summary>edit plan</summary>
-									<form method="POST" action="?/dayplan-edit" use:enhance class="edit-form">
-										<input type="hidden" name="id" value={plan.id} />
-										<input name="title" value={plan.title} placeholder="Title" required />
-										<input name="optional_date" type="date" value={plan.optional_date ?? ''} />
-										<textarea name="notes" rows="2" placeholder="Notes">{plan.notes ?? ''}</textarea
-										>
-										<button class="btn small primary" type="submit">Save</button>
-									</form>
-								</details>
-								<form method="POST" action="?/dayplan-add-stop" use:enhance class="add-row">
-									<input type="hidden" name="plan_id" value={plan.id} />
-									<input
-										type="search"
-										placeholder="Filter places…"
-										bind:value={dayPlanSearch}
-										class="dayplan-search"
-									/>
-									<select name="itinerary_item_id" required aria-label="place">
-										<option value="">Add a place...</option>
-										{#each dayPlanPlacesFiltered as { node, depth } (node.id)}
-											<option value={node.id}>{'· '.repeat(depth)}{node.title}</option>
-										{/each}
-									</select>
-									<input name="notes" placeholder="Stop note" />
-									<button class="btn small" type="submit">Add stop</button>
+							<details class="edit">
+								<summary>edit plan</summary>
+								<form method="POST" action="?/dayplan-edit" use:enhance class="edit-form">
+									<input type="hidden" name="id" value={plan.id} />
+									<input name="title" value={plan.title} placeholder="Title" required />
+									<input name="optional_date" type="date" value={plan.optional_date ?? ''} />
+									<textarea name="notes" rows="2" placeholder="Notes">{plan.notes ?? ''}</textarea>
+									<button class="btn small primary" type="submit">Save</button>
 								</form>
+							</details>
+							<form
+								method="POST"
+								action="?/dayplan-add-stop"
+								use:enhance={() => {
+									setRouteStatus(plan.id, '');
+									return async ({ result, update }) => {
+										await update({ reset: result.type === 'success' });
+										if (result.type === 'failure') {
+											setRouteStatus(
+												plan.id,
+												(result.data as { error?: string })?.error ?? 'Could not add stop.'
+											);
+										}
+									};
+								}}
+								class="add-row"
+							>
+								<input type="hidden" name="plan_id" value={plan.id} />
+								<input
+									type="search"
+									placeholder="Filter places…"
+									bind:value={dayPlanSearch}
+									class="dayplan-search"
+								/>
+								<select name="itinerary_item_id" required aria-label="place">
+									<option value="">Add a place...</option>
+									{#each dayPlanPlacesFiltered as { node, depth } (node.id)}
+										<option value={node.id}>{'· '.repeat(depth)}{node.title}</option>
+									{/each}
+								</select>
+								<input name="notes" placeholder="Stop note" />
+								<button class="btn small" type="submit">Add stop</button>
+							</form>
 						{/if}
 					</article>
 				{/each}
@@ -1920,6 +1972,9 @@
 							resetDayPlanBuilder();
 							dayPlanBuilderOpen = false;
 							await invalidateAll();
+						} else if (result.type === 'failure') {
+							dayPlanBuilderError =
+								(result.data as { error?: string })?.error ?? 'Could not save day plan.';
 						}
 					};
 				}}
@@ -1931,7 +1986,11 @@
 						<input name="title" placeholder="Title (required)" required bind:value={dayPlanTitle} />
 						<input name="optional_date" type="date" bind:value={dayPlanDate} />
 					</div>
-					<textarea name="notes" rows="2" placeholder="Plan notes (optional)" bind:value={dayPlanNotes}
+					<textarea
+						name="notes"
+						rows="2"
+						placeholder="Plan notes (optional)"
+						bind:value={dayPlanNotes}
 					></textarea>
 				</div>
 
@@ -2056,6 +2115,9 @@
 						</div>
 					</div>
 				{/if}
+				{#if dayPlanBuilderError}
+					<p class="field-error">{dayPlanBuilderError}</p>
+				{/if}
 				<div class="cand-actions">
 					<button
 						class="btn small primary save-day-btn"
@@ -2112,8 +2174,10 @@
 					aria-describedby="places-search-count"
 				/>
 				{#if placesSearch}
-					<button class="btn small places-search-clear" type="button" onclick={() => (placesSearch = '')}
-						>Clear</button
+					<button
+						class="btn small places-search-clear"
+						type="button"
+						onclick={() => (placesSearch = '')}>Clear</button
 					>
 				{/if}
 				<span id="places-search-count" class="places-search-count">
@@ -2349,7 +2413,9 @@
 			<details class="paste">
 				<summary>Import from Maps link</summary>
 				<div class="extract">
-					<p class="extract-head">Paste a Google Maps or Apple Maps link to extract the place and coordinates.</p>
+					<p class="extract-head">
+						Paste a Google Maps or Apple Maps link to extract the place and coordinates.
+					</p>
 					<form
 						method="POST"
 						action="?/itin-extract-url"
