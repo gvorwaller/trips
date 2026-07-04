@@ -222,6 +222,7 @@
 		lon: number | null;
 		place_id: string | null;
 		apple_maps_place_id: string | null;
+		meta?: Record<string, unknown> | null;
 		children: ItinCandidateRaw[];
 		duplicate?: boolean;
 		duplicate_title?: string | null;
@@ -252,6 +253,10 @@
 	let itinImagePasted = $state(false);
 	let itinImageExtracting = $state(false);
 	let itinImageMsg = $state('');
+	let itinBirdsFetching = $state(false);
+	let itinBirdsMsg = $state('');
+	let itinBirdsUsername = $state('');
+	let itinBirdsTripId = $state('');
 	const itinImportParents = $derived(
 		data.itineraryRows.filter((r) => ['day', 'section', 'place'].includes(r.node.item_type))
 	);
@@ -2477,6 +2482,58 @@
 					{#if itinUrlMsg}<p class="extract-msg">{itinUrlMsg}</p>{/if}
 				</div>
 			</details>
+			<details class="paste">
+				<summary>Import from Birds</summary>
+				<div class="extract">
+					<p class="extract-head">
+						Fetch birding trip stops from Birds, then review them before importing.
+					</p>
+					<form
+						method="POST"
+						action="?/itin-fetch-birds"
+						class="extract-form"
+						use:enhance={() => {
+							itinBirdsFetching = true;
+							itinBirdsMsg = '';
+							return async ({ result }) => {
+								itinBirdsFetching = false;
+								if (result.type === 'success' && result.data?.ok) {
+									const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
+									itinCandidates = withItinSelection(raw);
+									itinGeocode = false;
+									if (raw.length === 0) {
+										itinBirdsMsg = 'No importable Birds places found.';
+									} else {
+										const dupes = raw.filter((c) => c.duplicate).length;
+										itinBirdsMsg = `${raw.length} Birds place${raw.length === 1 ? '' : 's'} found${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+									}
+								} else if (result.type === 'failure') {
+									itinBirdsMsg =
+										(result.data as { error?: string })?.error ?? 'Birds import failed.';
+								} else {
+									itinBirdsMsg = 'Birds import failed.';
+								}
+							};
+						}}
+					>
+						<input
+							name="username"
+							bind:value={itinBirdsUsername}
+							placeholder="Birds username (optional)"
+						/>
+						<input
+							name="birds_trip_id"
+							inputmode="numeric"
+							bind:value={itinBirdsTripId}
+							placeholder="Birds trip id (optional)"
+						/>
+						<button class="btn small" type="submit" disabled={itinBirdsFetching}>
+							{itinBirdsFetching ? 'Fetching...' : 'Fetch Birds places'}
+						</button>
+					</form>
+					{#if itinBirdsMsg}<p class="extract-msg">{itinBirdsMsg}</p>{/if}
+				</div>
+			</details>
 			<details
 				class="paste"
 				ontoggle={(e) => {
@@ -2616,6 +2673,7 @@
 								itinExtractMsg = '';
 								itinUrlMsg = '';
 								itinImageMsg = '';
+								itinBirdsMsg = '';
 							}}>Clear</button
 						>
 					</div>

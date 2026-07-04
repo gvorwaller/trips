@@ -82,12 +82,12 @@ import {
 	extractItineraryFromText,
 	extractItineraryFromImage,
 	extractItineraryFromGoogleMapsUrl,
-	extractItineraryFromAppleMapsUrl,
-	type ExtractedItineraryItem
+	extractItineraryFromAppleMapsUrl
 } from '$server/itinerary-extract';
 import { isGoogleMapsUrl } from '$server/google-maps-url';
 import { isAppleMapsUrl } from '$server/apple-maps-url';
 import { importItineraryCandidates, type ItineraryImportCandidate } from '$server/itinerary-import';
+import { BirdsPlacesError, fetchBirdsItineraryCandidates } from '$server/birds-places';
 import {
 	listAttachmentsForTrip,
 	uploadAttachment,
@@ -357,30 +357,73 @@ function normalizeTitle(s: string): string {
 		.trim();
 }
 
+function sourceKey(meta: Record<string, unknown> | null | undefined): string | null {
+	const app = typeof meta?.source_app === 'string' ? meta.source_app.trim() : '';
+	const id = typeof meta?.source_id === 'string' ? meta.source_id.trim() : '';
+	return app && id ? `${app}:${id}` : null;
+}
+
+interface DuplicateCandidate {
+	title?: string | null;
+	place_id?: string | null;
+	lat?: number | null;
+	lon?: number | null;
+	meta?: Record<string, unknown> | null;
+	children?: DuplicateCandidate[];
+}
+
 function duplicateHint(
-	title: string,
-	existing: { title: string }[]
+	candidate: DuplicateCandidate,
+	existing: Array<{
+		title: string;
+		place_id: string | null;
+		lat: number | null;
+		lon: number | null;
+		meta: Record<string, unknown> | null;
+	}>
 ): { duplicate: boolean; duplicate_title: string | null } {
+	const title = candidate.title ?? '';
 	const n = normalizeTitle(title);
-	if (!n) return { duplicate: false, duplicate_title: null };
-	for (const item of existing) {
-		const e = normalizeTitle(item.title);
-		if (!e) continue;
-		if (e === n || e.includes(n) || n.includes(e)) {
-			return { duplicate: true, duplicate_title: item.title };
+	const candidateSource = sourceKey(candidate.meta);
+	for (const existingItem of existing) {
+		const e = normalizeTitle(existingItem.title);
+		if (n && e && (e === n || e.includes(n) || n.includes(e))) {
+			return { duplicate: true, duplicate_title: existingItem.title };
+		}
+		if (candidate.place_id && existingItem.place_id === candidate.place_id) {
+			return { duplicate: true, duplicate_title: existingItem.title };
+		}
+		const existingSource = sourceKey(existingItem.meta);
+		if (candidateSource && existingSource === candidateSource) {
+			return { duplicate: true, duplicate_title: existingItem.title };
+		}
+		if (
+			typeof candidate.lat === 'number' &&
+			typeof candidate.lon === 'number' &&
+			typeof existingItem.lat === 'number' &&
+			typeof existingItem.lon === 'number' &&
+			haversineKm(candidate.lat, candidate.lon, existingItem.lat, existingItem.lon) <= 0.03
+		) {
+			return { duplicate: true, duplicate_title: existingItem.title };
 		}
 	}
 	return { duplicate: false, duplicate_title: null };
 }
 
-function markDuplicates<T extends ExtractedItineraryItem>(
+function markDuplicates<T extends DuplicateCandidate>(
 	items: T[],
-	existing: { title: string }[]
+	existing: Array<{
+		title: string;
+		place_id: string | null;
+		lat: number | null;
+		lon: number | null;
+		meta: Record<string, unknown> | null;
+	}>
 ): Array<T & { duplicate: boolean; duplicate_title: string | null }> {
 	return items.map((item) => ({
 		...item,
-		...duplicateHint(item.title, existing),
-		children: markDuplicates(item.children, existing)
+		...duplicateHint(item, existing),
+		children: markDuplicates(item.children ?? [], existing)
 	}));
 }
 
@@ -515,6 +558,27 @@ export const actions: Actions = {
 			});
 		}
 		return { ok: true, candidates: markDuplicates(candidates, existing) };
+	},
+
+	'itin-fetch-birds': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const username = (form.get('username') ?? '').toString().trim() || null;
+		const birdsTripId = optId(form.get('birds_trip_id'));
+		const existing = await listItinerary(tripId);
+		try {
+			const candidates = await fetchBirdsItineraryCandidates({
+				username,
+				tripId: birdsTripId
+			});
+			return { ok: true, candidates: markDuplicates(candidates, existing) };
+		} catch (err) {
+			if (err instanceof BirdsPlacesError) {
+				return fail(502, { error: err.message });
+			}
+			throw err;
+		}
 	},
 
 	'itin-import-candidates': async ({ params, request, locals }) => {

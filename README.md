@@ -15,7 +15,7 @@ A private, mobile-first trip planning web app for one owner and one read-only vi
 
 ## Features
 
-- **Itinerary** — nestable outliner with item types: place, day, section, note. Places get map pins and one-tap Google/Apple/directions links. Multi-stop day routes. Freeform text import extracts candidate places/notes for review before saving.
+- **Itinerary** — nestable outliner with item types: place, day, section, note. Places get map pins and one-tap Google/Apple/directions links. Multi-stop day routes. Freeform text, Maps URL, photo, and Birds trip-stop imports extract candidate places/notes for review before saving.
 - **Packing** — nestable lists with check-off tracking, progress bars, templates, paste-many. Packing-only print.
 - **Reservations** — accommodation, flight, restaurant, transport, other. LLM extraction from pasted confirmations or uploaded documents. Manual reorder.
 - **Expenses** — manual entry or LLM extraction from bank statements / receipt screenshots. Category subtotals (lodging, food, transport, activities, other) and running total.
@@ -62,17 +62,29 @@ src/
 Copy `.env.example` (or create `.env`) with:
 
 ```
-DATABASE_URL=postgresql://trips_app:...@127.0.0.1:5437/trips
-TRIPS_SESSION_SECRET=<random-secret>
-DO_SPACES_ENDPOINT=https://<region>.digitaloceanspaces.com
-DO_SPACES_BUCKET=<bucket>
-DO_SPACES_KEY=<key>
-DO_SPACES_SECRET=<secret>
+PGHOST=127.0.0.1
+PGPORT=5437
+PGDATABASE=trips
+PGUSER=trips_app
+PGPASSWORD=<runtime-db-password>
+MIGRATION_PGUSER=trips_owner
+MIGRATION_PGPASSWORD=<migration-db-password>
+AUTH_SECRET=<random-secret>
 PUBLIC_GOOGLE_MAPS_API_KEY=<key>
 PUBLIC_GOOGLE_MAPS_MAP_ID=<map-id>
 GOOGLE_GEOCODING_KEY=<server-key>
+SPACES_KEY=<key>
+SPACES_SECRET=<secret>
+SPACES_BUCKET=<bucket>
+SPACES_REGION=sfo3
+SPACES_ENDPOINT=https://sfo3.digitaloceanspaces.com
 ANTHROPIC_API_KEY=<key>
+BIRDS_API_BASE_URL=<http://127.0.0.1:5178 for local test, http://127.0.0.1:3003 in prod>
+BIRDS_API_TOKEN=<shared-token-matching-Birds>
+BIRDS_API_USERNAME=<optional-default-birds-username>
 ```
+
+`BIRDS_API_TOKEN` must match `BIRDS_TRIPS_API_TOKEN` in the Birds app. Production uses loopback routing (`http://127.0.0.1:3003`) because both apps run on the same droplet; use the public Birds URL only if the apps are no longer co-located.
 
 ### Database
 
@@ -91,6 +103,13 @@ npm install
 npm run dev          # http://localhost:5179
 ```
 
+For the isolated test stack:
+
+```bash
+npm run test:db:up
+npm run dev:test     # http://127.0.0.1:5179, reads .env.test
+```
+
 ### Build and deploy
 
 ```bash
@@ -105,9 +124,38 @@ Runs on a shared DO droplet alongside sibling apps:
 
 | App | Port | PG Port |
 |-----|------|---------|
+| birds | 3003 | 5436 |
 | trips | 3004 | 5437 |
 
 Health endpoint: `GET /api/health` returns `{"db":"ok","version":"<git-sha>"}`.
+
+### Birds import
+
+Trips can fetch birding trip stops from the sibling Birds app into the itinerary import review flow. The import writes selected rows to the existing `itinerary_items` table with `item_type='place'`; Birds provenance is stored in `itinerary_items.meta`.
+
+The Trips server calls:
+
+```
+GET ${BIRDS_API_BASE_URL}/api/internal/trip-places
+Authorization: Bearer ${BIRDS_API_TOKEN}
+```
+
+Duplicate detection runs in preview and again at write time. It checks fuzzy title, Google place id, Birds source id stored in `meta`, and coordinates within 30 meters.
+
+### Operational logs
+
+PM2 captures app stdout/stderr:
+
+```bash
+ssh root@134.199.211.199 'pm2 logs trips --lines 200 --nostream'
+ssh root@134.199.211.199 'grep "\[birds-places-import\]" /var/log/pm2/trips.*.log | tail -100'
+```
+
+Birds import attempts emit token-free structured JSON lines with prefix `[birds-places-import]`. Each attempt has a `request_id`; Birds logs the same id under `[trip-places-export]`, so cross-app failures can be correlated:
+
+```bash
+ssh root@134.199.211.199 'grep "REQUEST_ID_HERE" /var/log/pm2/trips.*.log /var/log/pm2/birds.*.log'
+```
 
 ### Backups
 

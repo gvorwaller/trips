@@ -1,10 +1,13 @@
 import { withTransaction } from '$lib/db';
+import { haversineKm } from '$lib/geo';
 import { geocodePlace } from './geocode';
 import { ITEM_TYPES, type ItemType } from './itinerary';
 import { nextSortOrder } from './tree-sql';
 import type pg from 'pg';
 
 const MAX_ITEMS = 200;
+const MAX_META_BYTES = 5000;
+const DUPLICATE_COORD_KM = 0.03;
 const ITINERARY_IMPORT_LOCK_NS = 774747;
 
 export interface ItineraryImportCandidate {
@@ -19,6 +22,7 @@ export interface ItineraryImportCandidate {
 	lon?: number | null;
 	place_id?: string | null;
 	apple_maps_place_id?: string | null;
+	meta?: Record<string, unknown> | null;
 	children?: ItineraryImportCandidate[];
 }
 
@@ -32,7 +36,15 @@ interface PreparedItem {
 	lon: number | null;
 	place_id: string | null;
 	apple_maps_place_id: string | null;
+	meta: Record<string, unknown> | null;
 	children: PreparedItem[];
+}
+
+interface DuplicateState {
+	titles: Set<string>;
+	placeIds: Set<string>;
+	sourceKeys: Set<string>;
+	coords: Array<{ lat: number; lon: number }>;
 }
 
 function normalizeTitle(s: string): string {
@@ -51,25 +63,43 @@ function titleLooksDuplicate(title: string, seen: Set<string>): boolean {
 	return false;
 }
 
-function collectChildTitles(item: PreparedItem, seen: Set<string>) {
-	for (const child of item.children) collectTitles(child, seen);
+function sourceKey(meta: Record<string, unknown> | null): string | null {
+	const app = typeof meta?.source_app === 'string' ? meta.source_app.trim() : '';
+	const id = typeof meta?.source_id === 'string' ? meta.source_id.trim() : '';
+	return app && id ? `${app}:${id}` : null;
 }
 
-function collectTitles(item: PreparedItem, seen: Set<string>) {
-	const n = normalizeTitle(item.title);
-	if (n) seen.add(n);
-	collectChildTitles(item, seen);
+function addItemToDuplicateState(item: PreparedItem, state: DuplicateState) {
+	const title = normalizeTitle(item.title);
+	if (title) state.titles.add(title);
+	if (item.place_id) state.placeIds.add(item.place_id);
+	const source = sourceKey(item.meta);
+	if (source) state.sourceKeys.add(source);
+	if (item.lat !== null && item.lon !== null) state.coords.push({ lat: item.lat, lon: item.lon });
 }
 
-function filterDuplicatePrepared(items: PreparedItem[], seen: Set<string>): PreparedItem[] {
+function itemLooksDuplicate(item: PreparedItem, state: DuplicateState): boolean {
+	if (titleLooksDuplicate(item.title, state.titles)) return true;
+	if (item.place_id && state.placeIds.has(item.place_id)) return true;
+	const source = sourceKey(item.meta);
+	if (source && state.sourceKeys.has(source)) return true;
+	if (item.lat !== null && item.lon !== null) {
+		for (const coord of state.coords) {
+			if (haversineKm(coord.lat, coord.lon, item.lat, item.lon) <= DUPLICATE_COORD_KM) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+function filterDuplicatePrepared(items: PreparedItem[], state: DuplicateState): PreparedItem[] {
 	const out: PreparedItem[] = [];
 	for (const item of items) {
-		if (titleLooksDuplicate(item.title, seen)) continue;
-		const n = normalizeTitle(item.title);
-		if (n) seen.add(n);
-		const children = filterDuplicatePrepared(item.children, seen);
+		if (itemLooksDuplicate(item, state)) continue;
+		addItemToDuplicateState(item, state);
+		const children = filterDuplicatePrepared(item.children, state);
 		const accepted = { ...item, children };
-		collectChildTitles(accepted, seen);
 		out.push(accepted);
 	}
 	return out;
@@ -94,6 +124,17 @@ function cleanDate(v: unknown): string | null {
 function cleanNumber(v: unknown, min: number, max: number): number | null {
 	const n = typeof v === 'number' && Number.isFinite(v) ? v : null;
 	return n !== null && n >= min && n <= max ? n : null;
+}
+
+function cleanMeta(v: unknown): Record<string, unknown> | null {
+	if (v === null || typeof v !== 'object' || Array.isArray(v)) return null;
+	try {
+		const json = JSON.stringify(v);
+		if (json.length > MAX_META_BYTES) return null;
+		return JSON.parse(json) as Record<string, unknown>;
+	} catch {
+		return null;
+	}
 }
 
 function joinNotes(notes: string | null, extra: string | null): string | null {
@@ -127,6 +168,7 @@ async function prepareItem(
 	let lon = cleanNumber(raw.lon, -180, 180);
 	let placeId = cleanString(raw.place_id, 300);
 	const appleMapsPlaceId = cleanString(raw.apple_maps_place_id, 300);
+	const meta = cleanMeta(raw.meta);
 
 	if (item_type === 'place' && options.geocode && (lat === null || lon === null)) {
 		const q = locationQuery ?? address ?? [title, options.tripName].filter(Boolean).join(', ');
@@ -163,6 +205,7 @@ async function prepareItem(
 		lon,
 		place_id: placeId,
 		apple_maps_place_id: appleMapsPlaceId,
+		meta,
 		children
 	};
 }
@@ -189,8 +232,8 @@ async function insertPrepared(
 	const sort = await nextSortOrder(client, 'itinerary_items', tripId, parentId);
 	const res = await client.query<{ id: number }>(
 		`INSERT INTO itinerary_items
-		   (trip_id, parent_id, sort_order, item_type, title, notes, external_url, date, lat, lon, place_id, apple_maps_place_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		   (trip_id, parent_id, sort_order, item_type, title, notes, external_url, date, lat, lon, place_id, apple_maps_place_id, meta)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		 RETURNING id`,
 		[
 			tripId,
@@ -204,7 +247,8 @@ async function insertPrepared(
 			item.lat,
 			item.lon,
 			item.place_id,
-			item.apple_maps_place_id
+			item.apple_maps_place_id,
+			item.meta
 		]
 	);
 	const id = res.rows[0].id;
@@ -235,12 +279,27 @@ export async function importItineraryCandidates(
 			tripId
 		]);
 		await assertParentInTrip(client, tripId, options.parentId);
-		const existing = await client.query<{ title: string }>(
-			'SELECT title FROM itinerary_items WHERE trip_id = $1',
+		const existing = await client.query<{
+			title: string;
+			place_id: string | null;
+			lat: number | null;
+			lon: number | null;
+			meta: Record<string, unknown> | null;
+		}>(
+			'SELECT title, place_id, lat, lon, meta FROM itinerary_items WHERE trip_id = $1',
 			[tripId]
 		);
-		const seen = new Set(existing.rows.map((row) => normalizeTitle(row.title)).filter(Boolean));
-		const uniquePrepared = filterDuplicatePrepared(prepared, seen);
+		const duplicateState: DuplicateState = {
+			titles: new Set(existing.rows.map((row) => normalizeTitle(row.title)).filter(Boolean)),
+			placeIds: new Set(existing.rows.map((row) => row.place_id).filter((id): id is string => !!id)),
+			sourceKeys: new Set(
+				existing.rows.map((row) => sourceKey(row.meta)).filter((key): key is string => !!key)
+			),
+			coords: existing.rows
+				.filter((row) => typeof row.lat === 'number' && typeof row.lon === 'number')
+				.map((row) => ({ lat: row.lat as number, lon: row.lon as number }))
+		};
+		const uniquePrepared = filterDuplicatePrepared(prepared, duplicateState);
 		let imported = 0;
 		for (const item of uniquePrepared) {
 			imported += await insertPrepared(client, tripId, options.parentId, item);

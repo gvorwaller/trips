@@ -19,11 +19,12 @@ export interface ItineraryItem {
 	external_url: string | null;
 	google_maps_url: string | null;
 	date: string | null;
+	meta: Record<string, unknown> | null;
 }
 
 const SELECT_COLS = `id, trip_id, parent_id, sort_order, item_type, title, notes,
 	lat, lon, place_id, apple_maps_place_id, external_url, google_maps_url,
-	to_char(date, 'YYYY-MM-DD') AS date`;
+	to_char(date, 'YYYY-MM-DD') AS date, meta`;
 
 /** Flat list of a trip's itinerary items (the client assembles the tree). */
 export async function listItinerary(tripId: number): Promise<ItineraryItem[]> {
