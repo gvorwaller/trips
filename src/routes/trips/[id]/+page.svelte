@@ -289,6 +289,15 @@
 		];
 	}
 
+	const itinImportParentOptions = $derived([
+		{ value: '', label: 'Top level' },
+		...itinImportParents.map((row) => ({
+			value: String(row.node.id),
+			label: itinParentOptionLabel(row),
+			searchText: `${row.node.title} ${row.node.item_type}`
+		}))
+	]);
+
 	function withItinSelection(raw: ItinCandidateRaw[]): ItinCandidate[] {
 		return raw.map((c) => ({
 			...c,
@@ -425,7 +434,10 @@
 	let dayPlanNotes = $state('');
 	let dayPlanStops = $state<BuilderStop[]>([]);
 	let dayPlanAddPlaceId = $state('');
-	let dayPlanSearch = $state('');
+	// Per-plan "add stop" selection. A native <select required> blocked an empty
+	// submit; the combobox posts through a hidden input, which browsers exclude
+	// from constraint validation, so the Add button is gated on this instead.
+	let dayPlanAddStopSel = $state<Record<number, string>>({});
 	let dayPlanRouteBusy = $state<number | 'builder' | null>(null);
 	let dayPlanRouteStatus = $state<Record<number, string>>({});
 	let dayPlanAddStopError = $state<Record<number, string>>({});
@@ -456,11 +468,21 @@
 	const dayPlanParents = $derived(
 		data.itineraryRows.filter((r) => r.node.item_type === 'day' || r.node.item_type === 'section')
 	);
-	const dayPlanPlacesFiltered = $derived.by(() => {
-		const q = dayPlanSearch.toLowerCase().trim();
-		if (!q) return dayPlanPlaces;
-		return dayPlanPlaces.filter((r) => r.node.title.toLowerCase().includes(q));
-	});
+	const dayPlanPlaceOptions = $derived(
+		dayPlanPlaces.map((row) => ({
+			value: String(row.node.id),
+			label: `${'· '.repeat(row.depth)}${row.node.title}`,
+			searchText: row.node.title
+		}))
+	);
+	// Places already in the builder stay visible but greyed, as the old
+	// <option disabled> did, so it's clear why they can't be picked again.
+	const builderPlaceOptions = $derived(
+		dayPlanPlaceOptions.map((option) => ({
+			...option,
+			disabled: dayPlanStops.some((s) => String(s.itinerary_item_id) === option.value)
+		}))
+	);
 
 	function stopPlace(stop: BuilderStop): MapPlace {
 		return {
@@ -1021,7 +1043,6 @@
 		dayPlanNotes = '';
 		dayPlanStops = [];
 		dayPlanAddPlaceId = '';
-		dayPlanSearch = '';
 		builderAnchor = 'none';
 		dayPlanBuilderError = '';
 		builderRouteKm = null;
@@ -1938,6 +1959,10 @@
 									setAddStopError(plan.id, '');
 									return async ({ result, update }) => {
 										await update({ reset: result.type === 'success' });
+										if (result.type === 'success') {
+											// A native form reset can't clear the combobox's own state.
+											dayPlanAddStopSel[plan.id] = '';
+										}
 										if (result.type === 'failure') {
 											setAddStopError(
 												plan.id,
@@ -1949,20 +1974,25 @@
 								class="add-row"
 							>
 								<input type="hidden" name="plan_id" value={plan.id} />
-								<input
-									type="search"
-									placeholder="Filter places…"
-									bind:value={dayPlanSearch}
-									class="dayplan-search"
-								/>
-								<select name="itinerary_item_id" required aria-label="place">
-									<option value="">Add a place...</option>
-									{#each dayPlanPlacesFiltered as { node, depth } (node.id)}
-										<option value={node.id}>{'· '.repeat(depth)}{node.title}</option>
-									{/each}
-								</select>
+								<div class="add-stop-place">
+									<SearchableSelect
+										name="itinerary_item_id"
+										selectedValue={dayPlanAddStopSel[plan.id] ?? ''}
+										onSelect={(value) => (dayPlanAddStopSel[plan.id] = value)}
+										options={dayPlanPlaceOptions}
+										ariaLabel={`Add a place to ${plan.title}`}
+										placeholder="Add a place…"
+										emptyMessage="No places match"
+										maxResults={500}
+										listboxId={`dayplan-add-stop-options-${plan.id}`}
+									/>
+								</div>
 								<input name="notes" placeholder="Stop note" />
-								<button class="btn small" type="submit">Add stop</button>
+								<button
+									class="btn small"
+									type="submit"
+									disabled={!dayPlanAddStopSel[plan.id]}>Add stop</button
+								>
 							</form>
 							{@const addStopMessage = addStopError(plan.id)}
 							{#if addStopMessage}
@@ -2037,23 +2067,16 @@
 						<p class="builder-hint">Or pick individual places:</p>
 					{/if}
 					<div class="dayplan-picker">
-						<input
-							type="search"
-							placeholder="Type to filter the dropdown below…"
-							bind:value={dayPlanSearch}
-							class="dayplan-search"
+						<SearchableSelect
+							name="dayplan-builder-place"
+							bind:selectedValue={dayPlanAddPlaceId}
+							options={builderPlaceOptions}
+							ariaLabel="Choose a place"
+							placeholder="Choose a place…"
+							emptyMessage="No places match"
+							maxResults={500}
+							listboxId="dayplan-builder-place-options"
 						/>
-						<select bind:value={dayPlanAddPlaceId} aria-label="place">
-							<option value="">Choose a place...</option>
-							{#each dayPlanPlacesFiltered as { node, depth } (node.id)}
-								<option
-									value={String(node.id)}
-									disabled={dayPlanStops.some((s) => s.itinerary_item_id === node.id)}
-								>
-									{'· '.repeat(depth)}{node.title}
-								</option>
-							{/each}
-						</select>
 						<button
 							class="btn small"
 							type="button"
@@ -2349,6 +2372,7 @@
 												options={itinMoveParentOptionsFor(node.id)}
 												ariaLabel={`Move ${node.title} under`}
 												placeholder="Search parent"
+												maxResults={500}
 												listboxId={`itin-parent-options-${node.id}`}
 											/>
 										</label>
@@ -2629,16 +2653,17 @@
 			{#if itinCandidates.length > 0}
 				<div class="candidates itinerary-candidates">
 					<div class="import-target">
-						<label>
+						<label class="import-parent">
 							Import under
-							<select bind:value={itinImportParentId}>
-								<option value="">Top level</option>
-								{#each itinImportParents as { node, depth } (node.id)}
-									<option value={String(node.id)}>
-										{'· '.repeat(depth)}{node.title} ({node.item_type})
-									</option>
-								{/each}
-							</select>
+							<SearchableSelect
+								name="itin-import-parent"
+								bind:selectedValue={itinImportParentId}
+								options={itinImportParentOptions}
+								ariaLabel="Import under"
+								placeholder="Search parent"
+								maxResults={500}
+								listboxId="itin-import-parent-options"
+							/>
 						</label>
 						<label class="extract-opt">
 							<input type="checkbox" bind:checked={itinGeocode} />
@@ -4060,6 +4085,15 @@
 		margin-top: 10px;
 		flex-wrap: wrap;
 	}
+	/* A native select sizes to its widest <option>, and as a flex item it
+	   defaults to min-width: auto — so one long, indented place title makes the
+	   control wider than the viewport and scrolls the whole page sideways.
+	   Let these shrink and let the label text truncate instead. */
+	.add-row select,
+	.dayplan-builder select {
+		min-width: 0;
+		max-width: 100%;
+	}
 	.add-row input[name='title'],
 	.add-row input[name='name'] {
 		flex: 1;
@@ -4208,6 +4242,11 @@
 	}
 	.dayplan-list {
 		display: grid;
+		/* An `auto` track sizes to its content's min-content width, so a wide
+		   descendant (deep stop nesting, a long unbroken token) stretches the
+		   card past the viewport and gives the whole page a horizontal
+		   scrollbar. minmax(0, 1fr) caps the track at the container width. */
+		grid-template-columns: minmax(0, 1fr);
 		gap: 10px;
 	}
 	.dayplan-card {
@@ -4215,6 +4254,9 @@
 		border-radius: 8px;
 		padding: 12px;
 		background: var(--card);
+		/* Grid items default to min-width: auto — without this the card still
+		   refuses to shrink below its content. */
+		min-width: 0;
 	}
 	.dayplan-head {
 		display: flex;
@@ -4334,7 +4376,9 @@
 	}
 	.route-tools select {
 		flex: 1 1 180px;
-		max-width: 320px;
+		/* Same native-select shrink problem as .add-row select above. */
+		min-width: 0;
+		max-width: min(320px, 100%);
 	}
 	.route-status {
 		color: var(--muted);
@@ -4404,6 +4448,14 @@
 		color: var(--muted);
 		margin: 4px 0 2px;
 	}
+	/* A place title can be long enough to push the chip past the viewport;
+	   let it wrap inside the chip rather than widen the row. */
+	.quick-groups .chip-action {
+		max-width: 100%;
+		white-space: normal;
+		overflow-wrap: anywhere;
+		text-align: left;
+	}
 	.group-chip {
 		background: var(--accent-soft, #e8f0fe);
 		border-color: var(--link);
@@ -4423,6 +4475,10 @@
 	}
 	.dayplan-builder {
 		display: grid;
+		/* Same implicit auto-track problem as .dayplan-list: without this the
+		   builder's steps size to their min-content width and the panel runs
+		   off-screen on mobile. */
+		grid-template-columns: minmax(0, 1fr);
 		gap: 10px;
 		border: 2px solid var(--link);
 		border-radius: 8px;
@@ -4433,17 +4489,27 @@
 	.dayplan-builder textarea {
 		width: 100%;
 	}
+	/* Grid/flex children default to min-width: auto and so refuse to shrink
+	   below their content — these are the builder's direct children. */
+	.builder-step,
+	.dayplan-builder .cand-actions {
+		min-width: 0;
+	}
 	.dayplan-picker {
 		display: flex;
 		gap: 8px;
 		flex-wrap: wrap;
+		min-width: 0;
 	}
-	.dayplan-picker select {
+	.dayplan-picker :global(.searchable-select) {
 		flex: 1 1 220px;
+		min-width: 0;
 	}
-	.dayplan-search {
-		flex: 1 1 100%;
-		font-size: 16px;
+	/* The add-stop combobox needs room for a full place name but must still
+	   shrink on a phone. */
+	.add-stop-place {
+		flex: 1 1 200px;
+		min-width: 0;
 	}
 	.weather-strip {
 		display: flex;
@@ -4590,6 +4656,13 @@
 	.upload-row {
 		flex-wrap: wrap;
 	}
+	/* A file input's intrinsic width (filename + button) is wider than a phone
+	   viewport and it will not shrink on its own. Styles here are
+	   component-scoped, so this covers every file input on the trip page. */
+	input[type='file'] {
+		min-width: 0;
+		max-width: 100%;
+	}
 	.upload-row input[name='display_name'] {
 		flex: 1;
 		min-width: 140px;
@@ -4719,7 +4792,13 @@
 		font-size: 0.85rem;
 		color: var(--muted);
 	}
-	.import-target select,
+	.import-target label.import-parent {
+		flex: 1 1 260px;
+		max-width: 440px;
+	}
+	.import-target label.import-parent :global(.searchable-select) {
+		flex: 1;
+	}
 	.itin-cand-fields input,
 	.itin-cand-fields select,
 	.itin-cand-fields textarea {
