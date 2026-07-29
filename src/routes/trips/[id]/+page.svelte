@@ -1147,6 +1147,14 @@
 		return f((start ?? end) as string);
 	}
 
+	function fmtPlaceDate(date: string): string {
+		return new Date(`${date}T00:00:00`).toLocaleDateString(undefined, {
+			weekday: 'short',
+			month: 'short',
+			day: 'numeric'
+		});
+	}
+
 	function fmtSize(bytes: number): string {
 		if (bytes < 1024) return `${bytes} B`;
 		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
@@ -2193,11 +2201,16 @@
 </div>
 
 <!-- ── PLACES ─────────────────────────────────────────── -->
-<div class="card">
-	<button class="section-toggle" type="button" onclick={() => toggleSection('places')}>
-		<span class="section-caret">{sectionsCollapsed.has('places') ? '▸' : '▾'}</span>
-		<h2>Places</h2>
-	</button>
+<div class="card" id="places">
+	<div class="section-header">
+		<button class="section-toggle" type="button" onclick={() => toggleSection('places')}>
+			<span class="section-caret">{sectionsCollapsed.has('places') ? '▸' : '▾'}</span>
+			<h2>Places</h2>
+		</button>
+		<a class="btn small places-schedule-btn" href="/trips/{data.trip.id}/places/schedule">
+			📅 Schedule
+		</a>
+	</div>
 
 	{#if !sectionsCollapsed.has('places')}
 		{#if data.itineraryRows.length > 0}
@@ -2247,7 +2260,7 @@
 			{#if placesVisibleRows.length === 0}
 				<p class="muted places-empty">No places match "{placesSearch.trim()}".</p>
 			{:else}
-				<ul class="outline">
+				<ul class="outline places-outline">
 					{#each placesVisibleRows as { node, depth } (node.id)}
 						{@const route =
 							node.item_type === 'day' || node.item_type === 'section'
@@ -2276,7 +2289,14 @@
 									>{node.item_type}</span
 								>
 								<span class="grow">
-									<span class="ttl">{node.title}</span>
+									<span class="place-title-line">
+										<span class="ttl">{node.title}</span>
+										{#if node.item_type === 'place' && node.date}
+											<time class="place-date" datetime={node.date}>
+												📅 {fmtPlaceDate(node.date)}
+											</time>
+										{/if}
+									</span>
 									{#if node.notes}<div class="meta">{node.notes}</div>{/if}
 									<div class="chips">
 										{#if node.item_type === 'place'}
@@ -3825,6 +3845,34 @@
 		font-weight: 600;
 		overflow-wrap: anywhere;
 	}
+	.place-title-line {
+		display: flex;
+		align-items: baseline;
+		flex-wrap: wrap;
+		gap: 5px 8px;
+	}
+	.place-date {
+		display: inline-flex;
+		align-items: center;
+		flex-shrink: 0;
+		padding: 2px 7px;
+		border-radius: 999px;
+		background: var(--need-bg);
+		color: var(--need-text);
+		font-size: 0.76rem;
+		font-weight: 700;
+		white-space: nowrap;
+	}
+	/* Place rows have five tree controls. On phones those controls otherwise
+	   squeeze long titles into a nearly one-word-wide column. Keep the controls
+	   available, but give them their own row below the place content. */
+	.places-outline .line {
+		flex-wrap: wrap;
+	}
+	.places-outline .row-controls {
+		flex: 1 0 100%;
+		justify-content: flex-end;
+	}
 	.meta {
 		color: var(--muted);
 		font-size: 0.85rem;
@@ -3945,6 +3993,14 @@
 	@media (hover: none) and (pointer: coarse) {
 		.drag-handle {
 			display: none;
+		}
+	}
+	@media (min-width: 640px) {
+		.places-outline .line {
+			flex-wrap: nowrap;
+		}
+		.places-outline .row-controls {
+			flex: 0 0 auto;
 		}
 	}
 	li.drop-before {
@@ -4187,6 +4243,11 @@
 	}
 	.section-toggle h2 {
 		margin: 0;
+	}
+	.places-schedule-btn {
+		flex-shrink: 0;
+		min-height: 40px;
+		text-decoration: none;
 	}
 	.section-caret {
 		font-size: 0.9rem;
