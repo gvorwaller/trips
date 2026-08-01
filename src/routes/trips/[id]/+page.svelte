@@ -456,13 +456,40 @@
 		name: string;
 		lat: number;
 		lng: number;
-		distance_km: number;
-		itinerary_item_id?: number;
+		/** Extra driving this stop adds, in minutes. Null when it could not be routed. */
+		added_min: number | null;
+		added_km: number | null;
+		/** The road-optimal slot: between these two existing route points. */
+		edge_from: string;
+		edge_to: string;
+		/** Title of another day plan already using this place, if any. */
+		scheduled_in: string | null;
+		date_matches_plan: boolean;
+		approximate: boolean;
+		itinerary_item_id?: number | null;
 		place_id?: string | null;
 		vicinity: string | null;
 	};
+	type SuggestionSet = {
+		pinned: Suggestion[];
+		internal: Suggestion[];
+		external: Suggestion[];
+		approximate: boolean;
+		total: number;
+	};
 	let suggestBusy = $state<number | null>(null);
-	let suggestions = $state<Record<number, { internal: Suggestion[]; external: Suggestion[] }>>({});
+	let suggestions = $state<Record<number, SuggestionSet>>({});
+	/** Max extra driving the user will accept for a suggested stop. */
+	let suggestBudget = $state<Record<number, number>>({});
+	const DETOUR_BUDGETS = [15, 30, 60];
+	function budgetFor(planId: number): number {
+		return suggestBudget[planId] ?? 30;
+	}
+	function fmtAdded(s: Suggestion): string {
+		if (s.added_min === null) return 'drive time unavailable';
+		if (s.approximate) return `~${fmtDistance(s.added_km ?? 0)} off route`;
+		return s.added_min === 0 ? 'on the way' : `+${s.added_min} min`;
+	}
 
 	const dayPlanPlaces = $derived(data.itineraryRows.filter((r) => r.node.item_type === 'place'));
 	const dayPlanParents = $derived(
@@ -959,22 +986,37 @@
 
 	async function fetchSuggestions(planId: number) {
 		suggestBusy = planId;
+		const requestedBudget = budgetFor(planId);
 		try {
 			const fd = new FormData();
 			fd.set('plan_id', String(planId));
+			fd.set('detour_budget_min', String(requestedBudget));
 			const result = (await postAction('dayplan-suggest', fd)) as ActionData & {
+				pinned?: Suggestion[];
 				internal?: Suggestion[];
 				external?: Suggestion[];
+				approximate?: boolean;
+				total?: number;
 			};
+			// Scoring is a single round trip, but a second click or a budget change
+			// mid-flight can still land out of order — drop anything that no longer
+			// matches what the user is currently asking for.
+			if (budgetFor(planId) !== requestedBudget) return;
 			suggestions = {
 				...suggestions,
 				[planId]: {
+					pinned: result.pinned ?? [],
 					internal: result.internal ?? [],
-					external: result.external ?? []
+					external: result.external ?? [],
+					approximate: result.approximate ?? false,
+					total: result.total ?? 0
 				}
 			};
 		} catch (err) {
-			suggestions = { ...suggestions, [planId]: { internal: [], external: [] } };
+			suggestions = {
+				...suggestions,
+				[planId]: { pinned: [], internal: [], external: [], approximate: false, total: 0 }
+			};
 			aiNotesError = {
 				...aiNotesError,
 				[planId]: err instanceof Error ? err.message : 'Could not load suggestions.'
@@ -1004,6 +1046,8 @@
 				suggestions = {
 					...suggestions,
 					[planId]: {
+						...s,
+						pinned: s.pinned.filter((i) => i.name !== sug.name),
 						internal: s.internal.filter((i) => i.name !== sug.name),
 						external: s.external.filter((i) => i.name !== sug.name)
 					}
@@ -1894,26 +1938,94 @@
 											disabled={suggestBusy === plan.id || !canSuggestStops(stops, anchor)}
 											onclick={() => fetchSuggestions(plan.id)}
 										>
-											{suggestBusy === plan.id ? 'Loading...' : 'Suggest stops'}
+											{suggestBusy === plan.id ? 'Scoring routes...' : 'Suggest stops'}
 										</button>
+										<label class="detour-budget">
+											<span class="visually-hidden">Maximum extra driving</span>
+											<select
+												value={budgetFor(plan.id)}
+												onchange={(e) => {
+													suggestBudget = {
+														...suggestBudget,
+														[plan.id]: Number(e.currentTarget.value)
+													};
+													// Drop whatever is on screen: it was scored against the
+													// OLD budget, and leaving it painted under the new label
+													// reads as though those results match the new setting.
+													// Dropping the in-flight response is not enough on its own.
+													const { [plan.id]: _stale, ...rest } = suggestions;
+													suggestions = rest;
+													if (_stale) fetchSuggestions(plan.id);
+												}}
+											>
+												{#each DETOUR_BUDGETS as mins}
+													<option value={mins}>adds under {mins} min</option>
+												{/each}
+											</select>
+										</label>
 									</div>
 									{#if aiNotesError[plan.id]}
 										<p class="field-error">{aiNotesError[plan.id]}</p>
 									{/if}
 									{#if suggestions[plan.id]}
 										{@const s = suggestions[plan.id]}
-										{#if s.internal.length > 0 || s.external.length > 0}
+										{#if s.pinned.length > 0 || s.internal.length > 0 || s.external.length > 0}
 											<div class="suggestions-panel">
+												{#if s.approximate}
+													<p class="field-error" role="alert">
+														Approximate — road times unavailable, ordered by straight-line distance.
+													</p>
+												{/if}
+												{#if s.pinned.length > 0}
+													<p class="suggestions-heading pinned-heading">
+														Scheduled for this day
+													</p>
+													{#each s.pinned as sug}
+														<div class="suggestion-row pinned">
+															<span class="grow">
+																{sug.name}
+																<span class="added-cost" class:free={sug.added_min === 0}>
+																	{fmtAdded(sug)}
+																</span>
+																<span class="muted sug-slot">
+																	{#if sug.edge_from && sug.edge_to}
+																		between {sug.edge_from} and {sug.edge_to}
+																	{/if}
+																</span>
+															</span>
+															<button
+																class="btn small"
+																type="button"
+																onclick={() => addSuggestionAsStop(plan.id, sug)}>Add</button
+															>
+														</div>
+													{/each}
+												{/if}
 												{#if s.internal.length > 0}
-													<p class="suggestions-heading">From your itinerary</p>
+													<p class="suggestions-heading">
+														From your itinerary
+														{#if s.total > s.internal.length + s.external.length + s.pinned.length}
+															<span class="muted"
+																>— showing best {s.internal.length} of {s.total}</span
+															>
+														{/if}
+													</p>
 													{#each s.internal as sug}
 														<div class="suggestion-row">
-															<span class="grow"
-																>{sug.name}<span class="muted">
-																	— {fmtDistance(sug.distance_km)} from route{#if sug.vicinity}
-																		— {sug.vicinity}{/if}</span
-																></span
-															>
+															<span class="grow">
+																{sug.name}
+																<span class="added-cost" class:free={sug.added_min === 0}>
+																	{fmtAdded(sug)}
+																</span>
+																{#if sug.scheduled_in}
+																	<span class="sug-badge">in {sug.scheduled_in}</span>
+																{/if}
+																<span class="muted sug-slot">
+																	{#if sug.edge_from && sug.edge_to}
+																		between {sug.edge_from} and {sug.edge_to}
+																	{/if}{#if sug.vicinity} — {sug.vicinity}{/if}
+																</span>
+															</span>
 															<button
 																class="btn small"
 																type="button"
@@ -1926,12 +2038,20 @@
 													<p class="suggestions-heading">Nearby discoveries</p>
 													{#each s.external as sug}
 														<div class="suggestion-row">
-															<span class="grow"
-																>{sug.name}<span class="muted">
-																	— {fmtDistance(sug.distance_km)} from route{#if sug.vicinity}
-																		— {sug.vicinity}{/if}</span
-																></span
-															>
+															<span class="grow">
+																{sug.name}
+																<span class="added-cost" class:free={sug.added_min === 0}>
+																	{fmtAdded(sug)}
+																</span>
+																{#if sug.scheduled_in}
+																	<span class="sug-badge">in {sug.scheduled_in}</span>
+																{/if}
+																<span class="muted sug-slot">
+																	{#if sug.edge_from && sug.edge_to}
+																		between {sug.edge_from} and {sug.edge_to}
+																	{/if}{#if sug.vicinity} — {sug.vicinity}{/if}
+																</span>
+															</span>
 															<button
 																class="btn small"
 																type="button"
@@ -4630,6 +4750,72 @@
 		gap: 8px;
 		padding: 4px 0;
 		font-size: 0.9rem;
+	}
+	.suggestion-row .grow {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 4px 6px;
+	}
+	/* The added-driving figure is the whole point of the ranking, so it reads as
+	   a value rather than as trailing prose. */
+	.added-cost {
+		font-variant-numeric: tabular-nums;
+		font-weight: 600;
+		font-size: 0.8rem;
+		padding: 1px 6px;
+		border-radius: 10px;
+		background: var(--chip-bg, #eceff3);
+		color: var(--text, #1b1f24);
+		white-space: nowrap;
+	}
+	.added-cost.free {
+		background: #1c6b3f;
+		color: #fff;
+	}
+	.sug-badge {
+		font-size: 0.75rem;
+		padding: 1px 6px;
+		border-radius: 10px;
+		border: 1px solid var(--border, #ddd);
+		white-space: nowrap;
+	}
+	.sug-slot {
+		font-size: 0.78rem;
+	}
+	.pinned-heading {
+		color: #7a4b00;
+	}
+	.suggestion-row.pinned {
+		background: #fff6e5;
+		border-radius: 4px;
+		padding: 4px 6px;
+	}
+	.detour-budget select {
+		font-size: 0.85rem;
+		/* cs.md mandates >=48px tap targets. */
+		min-height: 48px;
+		padding: 4px 6px;
+	}
+	.visually-hidden {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+	}
+	@media (prefers-color-scheme: dark) {
+		.added-cost {
+			background: #2c3238;
+			color: #e8eaed;
+		}
+		.pinned-heading {
+			color: #ffca7a;
+		}
+		.suggestion-row.pinned {
+			background: #33291a;
+		}
 	}
 	.builder-stops input {
 		width: 100%;

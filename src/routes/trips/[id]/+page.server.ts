@@ -78,6 +78,7 @@ import {
 } from '$server/dayplans';
 import { generateTripNotes, AiNotesError } from '$server/ai-notes';
 import { placesNearbyCached } from '$server/geocode';
+import { rankSuggestions, type SuggestCandidate } from '$server/suggest-stops';
 import {
 	extractItineraryFromText,
 	extractItineraryFromImage,
@@ -129,6 +130,16 @@ function cleanText(v: FormDataEntryValue | null): string | null {
 function optDate(v: FormDataEntryValue | null): string | null {
 	const s = (v ?? '').toString().trim();
 	return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+/**
+ * Maximum extra driving a suggested stop may add, in minutes. Bounded so a
+ * hand-crafted request cannot ask the ranker to road-score the whole trip.
+ */
+function clampBudget(v: FormDataEntryValue | null): number {
+	const n = Number((v ?? '').toString().trim());
+	if (!Number.isFinite(n)) return 30;
+	return Math.min(120, Math.max(5, Math.round(n)));
 }
 
 function parseStopInputs(raw: string | undefined): StopInput[] {
@@ -849,73 +860,115 @@ export const actions: Actions = {
 		const allStops = await listStopsForTrip(tripId);
 		const planStops = allStops.filter((s) => s.day_plan_id === planId);
 		const planStopItemIds = new Set(planStops.map((s) => s.itinerary_item_id).filter(Boolean));
+		// Route order is load-bearing: listStopsForTrip returns ORDER BY sort_order,
+		// and rankSuggestions inserts candidates between consecutive vertices.
 		const locatedStops = planStops.filter(
 			(s) => typeof s.snapshot_lat === 'number' && typeof s.snapshot_lon === 'number'
 		);
-		const routePoints = [
-			...(plan.anchor_lat != null && plan.anchor_lon != null
-				? [{ lat: plan.anchor_lat, lon: plan.anchor_lon }]
-				: []),
-			...locatedStops.map((s) => ({ lat: s.snapshot_lat!, lon: s.snapshot_lon! }))
-		];
-		if (locatedStops.length === 0 || routePoints.length < 2) {
+		const anchor =
+			plan.anchor_lat != null && plan.anchor_lon != null
+				? { lat: plan.anchor_lat, lon: plan.anchor_lon, title: plan.anchor_title ?? 'Base' }
+				: null;
+		if (locatedStops.length === 0 || locatedStops.length + (anchor ? 1 : 0) < 2) {
 			return fail(400, { error: 'Need at least two route points with coordinates.' });
 		}
-		const centroidLat = routePoints.reduce((sum, point) => sum + point.lat, 0) / routePoints.length;
-		const centroidLon = routePoints.reduce((sum, point) => sum + point.lon, 0) / routePoints.length;
+		const routeStops = locatedStops.map((s) => ({
+			lat: s.snapshot_lat!,
+			lon: s.snapshot_lon!,
+			title: s.snapshot_title
+		}));
+
+		const budgetMin = clampBudget(form.get('detour_budget_min'));
+
+		// A place used by another day plan stays suggestible — cross-plan reuse is
+		// normal — but we label which plan, so the user is not guessing.
+		const allPlans = await listDayPlans(tripId);
+		const planTitles = new Map(allPlans.map((p) => [p.id, p.title]));
+		// Lodging is never a stop to suggest. A plan's anchor may be recorded as
+		// `place:<itinerary_item_id>`, and the same lodging often exists as a plain
+		// place row too — so exclude every anchor-referenced place across the whole
+		// trip, not just the current plan's. Proximity-to-route alone missed this:
+		// Blue Hill Thursday anchors on "Blue Hill, ME", so the Summit Sanctuary
+		// row sat off-route and was cheerfully suggested as somewhere to visit.
+		const anchorItemIds = new Set<number>();
+		for (const p of allPlans) {
+			const m = /^place:(\d+)$/.exec(p.anchor_source ?? '');
+			if (m) anchorItemIds.add(Number(m[1]));
+		}
+		const scheduledIn = new Map<number, string>();
+		for (const stop of allStops) {
+			if (stop.day_plan_id === planId || !stop.itinerary_item_id) continue;
+			if (scheduledIn.has(stop.itinerary_item_id)) continue;
+			const title = planTitles.get(stop.day_plan_id);
+			if (title) scheduledIn.set(stop.itinerary_item_id, title);
+		}
 
 		const itinerary = await listItinerary(tripId);
-		const internal = itinerary
-			.filter((item) => {
-				if (item.item_type !== 'place') return false;
-				if (planStopItemIds.has(item.id)) return false;
-				if (typeof item.lat !== 'number' || typeof item.lon !== 'number') return false;
-				const km = haversineKm(centroidLat, centroidLon, item.lat!, item.lon!);
-				return km <= 30;
-			})
+		const internal: SuggestCandidate[] = itinerary
+			.filter(
+				(item) =>
+					item.item_type === 'place' &&
+					!planStopItemIds.has(item.id) &&
+					!anchorItemIds.has(item.id) &&
+					typeof item.lat === 'number' &&
+					typeof item.lon === 'number'
+			)
 			.map((item) => ({
 				source: 'internal' as const,
 				name: item.title,
 				lat: item.lat!,
 				lng: item.lon!,
-				distance_km:
-					Math.round(haversineKm(centroidLat, centroidLon, item.lat!, item.lon!) * 10) / 10,
 				itinerary_item_id: item.id,
-				vicinity: item.notes ?? null
+				place_id: item.place_id ?? null,
+				vicinity: item.notes ?? null,
+				date: item.date ?? null,
+				scheduled_in: scheduledIn.get(item.id) ?? null
 			}));
 
-		let external: Array<{
-			source: 'external';
-			name: string;
-			lat: number;
-			lng: number;
-			distance_km: number;
-			place_id: string | null;
-			vicinity: string | null;
-		}> = [];
-		const nearbyResult = await placesNearbyCached(centroidLat, centroidLon);
+		// One nearby lookup at the route's midpoint purely to seed discovery
+		// candidates; unlike before, these are then scored by road detour exactly
+		// like itinerary places rather than surviving on raw distance.
+		const mid = routeStops[Math.floor(routeStops.length / 2)];
+		const external: SuggestCandidate[] = [];
+		const nearbyResult = await placesNearbyCached(mid.lat, mid.lon);
 		if (nearbyResult.status === 'ok') {
 			const internalNames = new Set(internal.map((i) => i.name.toLowerCase()));
 			const itinNames = new Set(itinerary.map((i) => i.title.toLowerCase()));
-			external = nearbyResult.places
-				.filter(
-					(p) =>
-						p.place_id &&
-						!internalNames.has(p.name.toLowerCase()) &&
-						!itinNames.has(p.name.toLowerCase())
-				)
-				.map((p) => ({
-					source: 'external' as const,
+			for (const p of nearbyResult.places) {
+				if (!p.place_id) continue;
+				if (internalNames.has(p.name.toLowerCase()) || itinNames.has(p.name.toLowerCase())) continue;
+				external.push({
+					source: 'external',
 					name: p.name,
 					lat: p.lat,
 					lng: p.lng,
-					distance_km: Math.round(haversineKm(centroidLat, centroidLon, p.lat, p.lng) * 10) / 10,
+					itinerary_item_id: null,
 					place_id: p.place_id,
-					vicinity: p.vicinity
-				}));
+					vicinity: p.vicinity,
+					date: null,
+					scheduled_in: null
+				});
+			}
 		}
 
-		return { ok: true, internal, external };
+		const ranked = await rankSuggestions({
+			anchor,
+			stops: routeStops,
+			candidates: [...internal, ...external],
+			budgetMin,
+			planDate: plan.optional_date
+		});
+
+		const cap = 20;
+		return {
+			ok: true,
+			pinned: ranked.pinned,
+			internal: ranked.items.filter((s) => s.source === 'internal').slice(0, cap),
+			external: ranked.items.filter((s) => s.source === 'external').slice(0, cap),
+			approximate: ranked.approximate,
+			total: ranked.total,
+			budget_min: budgetMin
+		};
 	},
 
 	'dayplan-add-suggestion': async ({ params, request, locals }) => {
