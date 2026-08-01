@@ -1,4 +1,5 @@
 import { flattenTree, type TreeNode } from './tree';
+import { dateStatus, type PlaceDateStatus } from '$lib/place-date';
 
 export interface PlaceScheduleSource extends TreeNode {
 	item_type: string;
@@ -11,7 +12,7 @@ export interface PlaceScheduleSource extends TreeNode {
 	apple_maps_place_id: string | null;
 }
 
-export type PlaceDateStatus = 'before' | 'during' | 'after' | 'unknown';
+export type { PlaceDateStatus } from '$lib/place-date';
 
 export interface PlaceScheduleEntry {
 	id: number;
@@ -46,16 +47,6 @@ export interface PlaceSchedule {
 	totalPlaces: number;
 }
 
-function dateStatus(
-	date: string,
-	tripStart: string | null,
-	tripEnd: string | null
-): PlaceDateStatus {
-	if (tripStart && date < tripStart) return 'before';
-	if (tripEnd && date > tripEnd) return 'after';
-	if (tripStart || tripEnd) return 'during';
-	return 'unknown';
-}
 
 /**
  * Build a read-only chronological view of place rows without changing the

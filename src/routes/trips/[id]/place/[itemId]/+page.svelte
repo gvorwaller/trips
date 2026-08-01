@@ -53,6 +53,22 @@
 	</div>
 </div>
 
+<div class="card">
+	<h2>Date</h2>
+	<p class="sub">
+		Optional. Set one where the timing is fixed — a market that only runs one day, a booked meal.
+		Dated places show up on the trip's Places schedule.
+	</p>
+	<form method="POST" action="?/set-date" class="date-row">
+		<input type="date" name="date" value={data.item.date ?? ''} aria-label="Date for this place" />
+		<button class="btn primary" type="submit">Save date</button>
+		<button class="btn" type="submit" name="clear" value="1">Clear</button>
+	</form>
+	{#if form?.error}
+		<p class="field-error" role="alert">{form.error}</p>
+	{/if}
+</div>
+
 {#if data.resolveCandidate}
 	<div class="card">
 		<h2>Possible Google match</h2>
@@ -203,6 +219,16 @@
 </div>
 
 <style>
+	.date-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		align-items: center;
+	}
+	.date-row input[type='date'] {
+		min-height: 48px;
+		font-size: 16px;
+	}
 	.back {
 		text-decoration: none;
 		font-size: 0.85rem;

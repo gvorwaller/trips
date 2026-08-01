@@ -3,7 +3,7 @@
 	import { invalidateAll } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { env } from '$env/dynamic/public';
-	import { flushSync, onMount } from 'svelte';
+	import { flushSync, onMount, tick } from 'svelte';
 	import AttachmentDownloadButton from '$components/AttachmentDownloadButton.svelte';
 	import PinMap from '$components/PinMap.svelte';
 	import SearchableSelect from '$components/SearchableSelect.svelte';
@@ -477,6 +477,16 @@
 		approximate: boolean;
 		total: number;
 	};
+	/** Day plan awaiting a name for its copy; null when the dialog is closed. */
+	let pendingDuplicatePlan = $state<{ id: number; title: string } | null>(null);
+	let duplicatePlanError = $state('');
+	let dupNameInput = $state<HTMLInputElement | null>(null);
+	$effect(() => {
+		if (pendingDuplicatePlan && dupNameInput) {
+			dupNameInput.focus();
+			dupNameInput.select();
+		}
+	});
 	let suggestBusy = $state<number | null>(null);
 	let suggestions = $state<Record<number, SuggestionSet>>({});
 	/** Max extra driving the user will accept for a suggested stop. */
@@ -981,6 +991,34 @@
 			};
 		} finally {
 			aiNotesBusy = null;
+		}
+	}
+
+	/**
+	 * Bring a day plan card's header into view.
+	 *
+	 * Two things made the naive version land wrong on big cards: `block: 'center'`
+	 * centres a 3000px card so its header sits far above the viewport, and weather
+	 * panels above the target finish loading after the scroll, shifting everything
+	 * down. So this aligns to the top and then re-corrects while the layout is
+	 * still settling.
+	 */
+	async function scrollToPlan(planId: number): Promise<void> {
+		let card: Element | null = null;
+		for (let attempt = 0; attempt < 10 && !card; attempt++) {
+			card = document.querySelector(`[data-plan-id="${planId}"]`);
+			if (!card) await new Promise((r) => setTimeout(r, 50));
+		}
+		if (!card) return;
+
+		card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+		// Correct for late layout shifts (weather, driving legs) rather than
+		// assuming the first scroll stuck.
+		for (const delay of [400, 500, 600]) {
+			await new Promise((r) => setTimeout(r, delay));
+			const top = card.getBoundingClientRect().top;
+			if (Math.abs(top) <= 24) return;
+			card.scrollIntoView({ behavior: 'smooth', block: 'start' });
 		}
 	}
 
@@ -1688,7 +1726,7 @@
 					{@const legLinks = googleLegByLegLinks(routePlaces(stops, anchor))}
 					{@const summary = routeSummary(stops, anchor)}
 					{@const weather = data.weatherByPlan?.[plan.id]}
-					<article class="dayplan-card">
+					<article class="dayplan-card" data-plan-id={plan.id}>
 						<div class="dayplan-head">
 							<div class="grow">
 								<div class="ttl">{plan.title}</div>
@@ -1745,6 +1783,15 @@
 									>
 								{/if}
 								{#if !isViewer}
+									<button
+										type="button"
+										class="btn small"
+										title="duplicate this day plan"
+										onclick={() => {
+											duplicatePlanError = '';
+											pendingDuplicatePlan = { id: plan.id, title: `${plan.title} (copy)` };
+										}}>⧉ Duplicate</button
+									>
 									<button
 										type="button"
 										class="del"
@@ -3840,11 +3887,83 @@
 			</div>
 		{/if}
 	</div>
+
+	<!-- Separate from the delete modal: that one hardcodes a danger button and has
+	     no text input, and duplicating is not destructive. -->
+	<div class="modal-overlay" class:open={pendingDuplicatePlan !== null}>
+		{#if pendingDuplicatePlan}
+			<div class="modal" role="dialog" aria-modal="true" aria-labelledby="dup-plan-title">
+				<h3 id="dup-plan-title">Duplicate day plan</h3>
+				<p class="muted">
+					Copies the stops, notes and starting point. Visited marks and drive times start fresh.
+				</p>
+				<form
+					method="POST"
+					action="?/dayplan-duplicate"
+					use:enhance={({ formData, cancel }) => {
+						duplicatePlanError = '';
+						// Validate here rather than with `required`: the native block
+						// suppressed the submit silently, so no error ever surfaced.
+						if (!(formData.get('title') ?? '').toString().trim()) {
+							duplicatePlanError = 'Title is required.';
+							cancel();
+							return;
+						}
+						return async ({ result }) => {
+							if (result.type === 'failure') {
+								duplicatePlanError =
+									(result.data as { error?: string })?.error ?? 'Could not duplicate.';
+								return;
+							}
+							const newId =
+								result.type === 'success'
+									? (result.data as { new_plan_id?: number })?.new_plan_id
+									: undefined;
+							await invalidateAll();
+							pendingDuplicatePlan = null;
+							// A single rAF fired before Svelte had committed the new card,
+							// so the query found nothing and the page never moved. Wait for
+							// the render, then poll briefly for the node.
+							if (newId) {
+								await tick();
+								await scrollToPlan(newId);
+							}
+						};
+					}}
+				>
+					<input type="hidden" name="id" value={pendingDuplicatePlan.id} />
+					<label class="dup-name">
+						<span>Name</span>
+						<input
+							bind:this={dupNameInput}
+							name="title"
+							value={pendingDuplicatePlan.title}
+							maxlength="300"
+							onfocus={(e) => e.currentTarget.select()}
+							onmouseup={(e) => e.preventDefault()}
+						/>
+					</label>
+					{#if duplicatePlanError}
+						<p class="field-error" role="alert">{duplicatePlanError}</p>
+					{/if}
+					<div class="actions">
+						<button class="btn" type="button" onclick={() => (pendingDuplicatePlan = null)}>
+							Cancel
+						</button>
+						<button class="btn primary" type="submit">Duplicate</button>
+					</div>
+				</form>
+			</div>
+		{/if}
+	</div>
 {/if}
 
 <svelte:window
 	onkeydown={(e) => {
-		if (e.key === 'Escape') pendingDelete = null;
+		if (e.key === 'Escape') {
+			pendingDelete = null;
+			pendingDuplicatePlan = null;
+		}
 	}}
 />
 
@@ -4790,6 +4909,19 @@
 		background: #fff6e5;
 		border-radius: 4px;
 		padding: 4px 6px;
+	}
+	.dayplan-card {
+		/* Keeps the header below the sticky nav when scrolled to. */
+		scroll-margin-top: 72px;
+	}
+	.dup-name {
+		display: grid;
+		gap: 4px;
+		margin: 8px 0;
+	}
+	.dup-name input {
+		width: 100%;
+		min-height: 48px;
 	}
 	.detour-budget select {
 		font-size: 0.85rem;

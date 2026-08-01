@@ -64,6 +64,7 @@ import {
 	createDayPlan,
 	updateDayPlan,
 	deleteDayPlan,
+	duplicateDayPlan,
 	addStop,
 	removeStop,
 	reorderStops,
@@ -79,6 +80,7 @@ import {
 import { generateTripNotes, AiNotesError } from '$server/ai-notes';
 import { placesNearbyCached } from '$server/geocode';
 import { rankSuggestions, type SuggestCandidate } from '$server/suggest-stops';
+import { parsePlaceDate } from '$lib/place-date';
 import {
 	extractItineraryFromText,
 	extractItineraryFromImage,
@@ -623,6 +625,11 @@ export const actions: Actions = {
 		const title = (form.get('title') ?? '').toString().trim();
 		if (!title) return fail(400, { error: 'Title is required.' });
 		const itemType = optType(form.get('item_type'));
+		// Previously the raw string went straight to Postgres, so a malformed date
+		// surfaced as a 500 rather than a field error.
+		const parsedDate = parsePlaceDate(form.get('date'));
+		if ('error' in parsedDate) return fail(400, { error: parsedDate.error });
+		const itinDate = parsedDate.date;
 		const text = manualItineraryText(
 			itemType ?? 'place',
 			title,
@@ -632,7 +639,7 @@ export const actions: Actions = {
 			title: text.title,
 			notes: text.notes,
 			external_url: (form.get('external_url') ?? '').toString().trim() || null,
-			date: (form.get('date') ?? '').toString().trim() || null,
+			date: itinDate,
 			item_type: itemType
 		});
 		return { ok: true };
@@ -715,6 +722,23 @@ export const actions: Actions = {
 		});
 		if (!ok) throw error(404, 'Day plan not found');
 		return { ok: true };
+	},
+
+	'dayplan-duplicate': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		const title = (form.get('title') ?? '').toString().trim();
+		if (!title) return fail(400, { error: 'Title is required.' });
+		const newPlanId = await duplicateDayPlan(
+			tripId,
+			parseId(form.get('id')),
+			title.slice(0, 300)
+		);
+		if (!newPlanId) throw error(404, 'Day plan not found');
+		// Returned so the UI can scroll to the copy: with seven plans on the page
+		// a silent insert below the fold reads as though nothing happened.
+		return { ok: true, new_plan_id: newPlanId };
 	},
 
 	'dayplan-delete': async ({ params, request, locals }) => {

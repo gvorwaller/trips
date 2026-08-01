@@ -1,7 +1,8 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { getTrip } from '$server/trips';
-import { getItem, setLocation, setPlaceId, clearLocation } from '$server/itinerary';
+import { getItem, setLocation, setPlaceId, clearLocation, setItemDate } from '$server/itinerary';
+import { parsePlaceDate } from '$lib/place-date';
 import { getPlaceDetails, type PlaceDetailsResult } from '$server/place-details';
 import { placesTextSearchCached } from '$server/geocode';
 import { askAboutPlace, AnthropicError, MAX_QUESTION_LENGTH } from '$server/place-ai';
@@ -76,6 +77,24 @@ export const actions: Actions = {
 		}
 		await setLocation(tripId, parseId(params.itemId), lat, lon, placeId);
 		throw redirect(303, `/trips/${tripId}`);
+	},
+
+	/**
+	 * Separate from `save`, which is location-only and refuses without valid
+	 * coordinates — a place can legitimately have a date but no pin yet.
+	 */
+	'set-date': async ({ params, request, locals }) => {
+		if (!locals.ownerId) throw error(500, 'No owner configured');
+		const tripId = parseId(params.id);
+		const trip = await getTrip(locals.ownerId, tripId);
+		if (!trip) throw error(404, 'Trip not found');
+		const form = await request.formData();
+		// The Clear button posts its own field; the date input is submitted too.
+		const parsed = form.get('clear') !== null ? { date: null } : parsePlaceDate(form.get('date'));
+		if ('error' in parsed) return fail(400, { error: parsed.error });
+		const ok = await setItemDate(tripId, parseId(params.itemId), parsed.date);
+		if (!ok) return fail(404, { error: 'That place is no longer in this trip.' });
+		return { ok: true };
 	},
 
 	clear: async ({ params, locals }) => {

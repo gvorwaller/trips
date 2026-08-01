@@ -138,6 +138,61 @@ export async function updateItem(tripId: number, id: number, patch: ItemPatch): 
 	return (res.rowCount ?? 0) > 0;
 }
 
+/**
+ * Set (or clear, with null) one place's date.
+ *
+ * Deliberately separate from updateItem, which despite its name is a full
+ * overwrite — it assigns notes, external_url and date unconditionally, so using
+ * it to change only a date would silently wipe the row's notes and link.
+ *
+ * Restricted to item_type = 'place' so a bulk form cannot re-date section, day
+ * or note rows.
+ */
+export async function setItemDate(
+	tripId: number,
+	id: number,
+	date: string | null
+): Promise<boolean> {
+	const res = await query(
+		`UPDATE itinerary_items SET date = $3, updated_at = NOW()
+		  WHERE id = $1 AND trip_id = $2 AND item_type = 'place'`,
+		[id, tripId, date]
+	);
+	return (res.rowCount ?? 0) > 0;
+}
+
+/**
+ * Apply one date to many places at once, all or nothing.
+ *
+ * A per-row UPDATE loop inside a transaction would NOT be atomic in the way
+ * that matters: an id belonging to another trip simply matches zero rows, and
+ * the valid rows would still commit. So this issues a single statement and
+ * compares the returned id set against the request, throwing on any mismatch —
+ * a partial bulk assign that reports success is worse than an outright failure.
+ */
+export async function setItemDates(
+	tripId: number,
+	ids: number[],
+	date: string | null
+): Promise<number[]> {
+	const wanted = [...new Set(ids)];
+	if (wanted.length === 0) return [];
+	return withTransaction(async (client) => {
+		const res = await client.query<{ id: number }>(
+			`UPDATE itinerary_items SET date = $3, updated_at = NOW()
+			  WHERE id = ANY($1::int[]) AND trip_id = $2 AND item_type = 'place'
+			 RETURNING id`,
+			[wanted, tripId, date]
+		);
+		const updated = res.rows.map((r) => r.id);
+		if (updated.length !== wanted.length) {
+			const missing = wanted.filter((id) => !updated.includes(id));
+			throw new Error(`Some places could not be updated: ${missing.join(', ')}`);
+		}
+		return updated;
+	});
+}
+
 export async function deleteItem(tripId: number, id: number): Promise<boolean> {
 	const res = await query(`DELETE FROM itinerary_items WHERE id = $1 AND trip_id = $2`, [
 		id,

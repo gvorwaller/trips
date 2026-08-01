@@ -1,7 +1,33 @@
 <script lang="ts">
+	import { enhance } from '$app/forms';
+	import { invalidateAll } from '$app/navigation';
 	import { googleMapsLink, googleDirectionsLink } from '$lib/maplinks';
+	import { dateStatus, rangeWarning } from '$lib/place-date';
 
 	let { data } = $props();
+	const isViewer = $derived(data.user?.role === 'viewer');
+
+	/** Places ticked for a bulk assign, keyed by id. */
+	let selected = $state<Record<number, boolean>>({});
+	let bulkDate = $state('');
+	let editError = $state('');
+	const selectedIds = $derived(
+		Object.entries(selected)
+			.filter(([, on]) => on)
+			.map(([id]) => Number(id))
+	);
+
+	/** Advisory only — an out-of-range date still saves. */
+	function warnFor(value: string): string | null {
+		if (!value) return null;
+		return rangeWarning(dateStatus(value, data.trip.start_date, data.trip.end_date));
+	}
+
+	function toggleGroup(ids: number[], on: boolean) {
+		const next = { ...selected };
+		for (const id of ids) next[id] = on;
+		selected = next;
+	}
 
 	function fmtDate(date: string, includeYear = true): string {
 		return new Date(`${date}T00:00:00`).toLocaleDateString(undefined, {
@@ -117,6 +143,37 @@
 									>Directions</a
 								>
 							</div>
+							{#if !isViewer}
+								<form
+									method="POST"
+									action="?/set-date"
+									class="date-form"
+									use:enhance={() => {
+										editError = '';
+										return async ({ result, update }) => {
+											if (result.type === 'failure') {
+												editError = (result.data as { error?: string })?.error ?? 'Could not save.';
+												return;
+											}
+											await update({ reset: false });
+											await invalidateAll();
+										};
+									}}
+								>
+									<input type="hidden" name="id" value={place.id} />
+									<input type="date" name="date" value={place.date ?? ''} aria-label="Date" />
+									<button class="btn tiny" type="submit">Save</button>
+									<!-- Distinct field name: a second control also called "date" loses to
+									     the input above it, because form.get() returns the first value. -->
+									<button
+										class="btn tiny"
+										type="submit"
+										name="clear"
+										value="1"
+										title="Remove this date">Clear</button
+									>
+								</form>
+							{/if}
 						</li>
 					{/each}
 				</ul>
@@ -133,16 +190,75 @@
 	{#if data.schedule.undatedGroups.length === 0}
 		<p class="all-scheduled">Every place has a date.</p>
 	{:else}
-		<p class="backlog-note">
-			Use this as the planning backlog. Select a place to find it in the existing Places hierarchy
-			and assign a date there.
-		</p>
+		{#if isViewer}
+			<p class="backlog-note">Use this as the planning backlog.</p>
+		{:else}
+			<p class="backlog-note">
+				Dates are optional — most days get planned as you go. Set one where the timing is fixed: a
+				market that only runs Saturday, a booked dinner.
+			</p>
+			<form
+				method="POST"
+				action="?/bulk-set-date"
+				class="bulk-bar"
+				use:enhance={() => {
+					editError = '';
+					return async ({ result, update }) => {
+						if (result.type === 'failure') {
+							editError = (result.data as { error?: string })?.error ?? 'Could not save.';
+							return;
+						}
+						await update({ reset: false });
+						selected = {};
+						bulkDate = '';
+						await invalidateAll();
+					};
+				}}
+			>
+				{#each selectedIds as id (id)}
+					<input type="hidden" name="ids" value={id} />
+				{/each}
+				<input type="date" name="date" bind:value={bulkDate} aria-label="Date for selected places" />
+				<button class="btn small primary" type="submit" disabled={!bulkDate || selectedIds.length === 0}>
+					Assign to {selectedIds.length} selected
+				</button>
+				{#if warnFor(bulkDate)}
+					<span class="range-warning">{warnFor(bulkDate)}</span>
+				{/if}
+			</form>
+			{#if editError}
+				<p class="field-error" role="alert">{editError}</p>
+			{/if}
+		{/if}
 		{#each data.schedule.undatedGroups as group (group.title)}
 			<section class="backlog-group">
-				<h2>{group.title}</h2>
+				<h2>
+					{group.title}
+					{#if !isViewer}
+						<button
+							type="button"
+							class="btn tiny"
+							onclick={() =>
+								toggleGroup(
+									group.places.map((p) => p.id),
+									!group.places.every((p) => selected[p.id])
+								)}
+						>
+							{group.places.every((p) => selected[p.id]) ? 'Clear' : 'Select all'}
+						</button>
+					{/if}
+				</h2>
 				<ul class="place-list compact">
 					{#each group.places as place (place.id)}
 						<li>
+							{#if !isViewer}
+								<input
+									type="checkbox"
+									checked={selected[place.id] ?? false}
+									onchange={(e) => (selected = { ...selected, [place.id]: e.currentTarget.checked })}
+									aria-label={`Select ${place.title}`}
+								/>
+							{/if}
 							<div class="place-main">
 								<a class="place-title" href="/trips/{data.trip.id}#itin-{place.id}">
 									{place.title}
@@ -163,6 +279,48 @@
 </details>
 
 <style>
+	.date-form {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		align-items: center;
+		margin-top: 6px;
+	}
+	.date-form input[type='date'] {
+		min-height: 48px;
+		font-size: 16px;
+	}
+	.bulk-bar {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		align-items: center;
+		margin: 8px 0;
+	}
+	.bulk-bar input[type='date'] {
+		min-height: 48px;
+		font-size: 16px;
+	}
+	.btn.tiny {
+		min-height: 48px;
+		padding: 4px 10px;
+		font-size: 0.8rem;
+	}
+	.backlog-group input[type='checkbox'] {
+		width: 24px;
+		height: 24px;
+		margin-right: 8px;
+		flex: none;
+	}
+	/* The printed schedule is a reference sheet — editing controls have no place on it. */
+	@media print {
+		.date-form,
+		.bulk-bar,
+		.backlog-group input[type='checkbox'],
+		.btn.tiny {
+			display: none !important;
+		}
+	}
 	.back {
 		text-decoration: none;
 		font-size: 0.85rem;

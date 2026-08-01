@@ -223,6 +223,83 @@ async function assertPlanInTrip(
 	return (res.rowCount ?? 0) > 0;
 }
 
+/**
+ * Copy a day plan and its stops under a new title, within the same trip.
+ *
+ * Mirrors the deep copy duplicateTrip already performs (src/lib/server/clone.ts)
+ * and keeps its policy: `visited` resets, and drive_km/drive_min/ai_notes are
+ * deliberately not copied because drive legs get recomputed and AI notes
+ * regenerated for the new plan.
+ *
+ * Stops are copied row-for-row rather than through addStop/insertStop, so the
+ * duplicate-location guard does not re-fire — the source plan is already valid,
+ * and re-running the 30 m proximity check would reject legitimate copies. This
+ * matches how clone.ts copies stops.
+ *
+ * itinerary_item_id carries over unchanged: unlike clone.ts, which remaps ids
+ * because it rebuilds the itinerary in a new trip, this stays in one trip so the
+ * references remain valid. The same is true of the anchor's `place:<id>` /
+ * `res:<id>` reference.
+ *
+ * Returns the new plan id, or null when the source plan is not in this trip.
+ */
+export async function duplicateDayPlan(
+	tripId: number,
+	planId: number,
+	title: string
+): Promise<number | null> {
+	return withTransaction(async (client) => {
+		const source = await client.query<{
+			notes: string | null;
+			optional_date: string | null;
+			anchor_source: string | null;
+			anchor_title: string | null;
+			anchor_lat: number | null;
+			anchor_lon: number | null;
+		}>(
+			`SELECT notes, optional_date, anchor_source, anchor_title, anchor_lat, anchor_lon
+			   FROM day_plans WHERE id = $1 AND trip_id = $2`,
+			[planId, tripId]
+		);
+		const plan = source.rows[0];
+		if (!plan) return null;
+
+		// The four anchor columns move together or not at all: day_plans_anchor_complete
+		// (migration 0009) rejects a partially populated anchor.
+		const created = await client.query<{ id: number }>(
+			`INSERT INTO day_plans
+			   (trip_id, title, notes, optional_date, anchor_source, anchor_title, anchor_lat, anchor_lon)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			 RETURNING id`,
+			[
+				tripId,
+				title,
+				plan.notes,
+				plan.optional_date,
+				plan.anchor_source,
+				plan.anchor_title,
+				plan.anchor_lat,
+				plan.anchor_lon
+			]
+		);
+		const newPlanId = created.rows[0].id;
+
+		await client.query(
+			`INSERT INTO day_plan_stops
+			   (day_plan_id, itinerary_item_id, sort_order, notes, visited,
+			    snapshot_title, snapshot_lat, snapshot_lon, snapshot_place_id)
+			 SELECT $1, itinerary_item_id, sort_order, notes, FALSE,
+			        snapshot_title, snapshot_lat, snapshot_lon, snapshot_place_id
+			   FROM day_plan_stops
+			  WHERE day_plan_id = $2
+			  ORDER BY sort_order, id`,
+			[newPlanId, planId]
+		);
+
+		return newPlanId;
+	});
+}
+
 async function insertStop(
 	client: Pick<pg.PoolClient, 'query'>,
 	tripId: number,
