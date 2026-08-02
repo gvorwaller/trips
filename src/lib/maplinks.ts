@@ -75,7 +75,14 @@ function waypointToken(p: MapPlace): string {
 /**
  * Multi-stop directions for an ordered list of places (a day's route).
  * Returns null if fewer than 2 places. First = origin, last = destination,
- * the rest become waypoints (Google caps free waypoints ~9; we pass through).
+ * the rest become waypoints.
+ *
+ * Caps are the CALLER's to enforce, and the mobile one is the strict one:
+ * Google Maps URLs honour 3 waypoints in mobile browsers, 9 elsewhere, and cap
+ * the whole URL at 2,048 characters
+ * (https://developers.google.com/maps/documentation/urls/get-started).
+ * Over either limit the link degrades silently. See dayPlanRouteLink in
+ * $lib/dayplan-export, which gates on the generated URL.
  */
 export function googleDayDirectionsLink(places: MapPlace[]): string | null {
 	const usable = places.filter((p) => p.name || hasCoords(p));

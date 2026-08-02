@@ -599,6 +599,25 @@ export async function setStopVisited(
 	return (res.rowCount ?? 0) > 0;
 }
 
+/**
+ * Stops for a single plan, scoped by trip so a plan id from another account
+ * cannot be read. Used by the export routes, which need one plan rather than
+ * the whole trip's stops.
+ */
+export async function listStopsForPlan(tripId: number, planId: number): Promise<DayPlanStop[]> {
+	const res = await query<DayPlanStop>(
+		`SELECT s.id, s.day_plan_id, s.itinerary_item_id, s.sort_order, s.notes, s.visited,
+		        s.snapshot_title, s.snapshot_lat, s.snapshot_lon, s.snapshot_place_id,
+		        s.drive_km, s.drive_min, s.ai_notes
+		   FROM day_plan_stops s
+		   JOIN day_plans p ON p.id = s.day_plan_id
+		  WHERE p.id = $1 AND p.trip_id = $2
+		  ORDER BY s.sort_order, s.id`,
+		[planId, tripId]
+	);
+	return res.rows;
+}
+
 export async function listStopsForTrip(tripId: number): Promise<DayPlanStop[]> {
 	const res = await query<DayPlanStop>(
 		`SELECT s.id, s.day_plan_id, s.itinerary_item_id, s.sort_order, s.notes, s.visited,

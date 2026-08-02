@@ -24,6 +24,7 @@
 		type DrivingLeg,
 		type RouteStop
 	} from '$lib/route';
+	import { dayPlanRouteLink } from '$lib/dayplan-export';
 	import {
 		routeSummary as drivingRouteSummary,
 		legSummary as drivingLegSummary,
@@ -32,6 +33,7 @@
 	import {
 		anchorOptions as buildAnchorOptions,
 		anchorFromValue as resolveAnchor,
+		cleanAnchorTitle,
 		type AnchorOption,
 		type PlanAnchor
 	} from '$lib/dayplan-anchor';
@@ -578,6 +580,8 @@
 		return anchor ? { name: anchor.title, lat: anchor.lat, lon: anchor.lon } : null;
 	}
 
+	// The stored title carries the picker's grouping prefix ("Place: ...",
+	// "Stay: ..."), which is noise once an anchor is chosen.
 	function planAnchor(plan: DayPlan): PlanAnchor | null {
 		if (
 			!plan.anchor_source ||
@@ -589,7 +593,7 @@
 		}
 		return {
 			source: plan.anchor_source,
-			title: plan.anchor_title,
+			title: cleanAnchorTitle(plan.anchor_title),
 			lat: plan.anchor_lat,
 			lon: plan.anchor_lon
 		};
@@ -1663,7 +1667,8 @@
 				{#each data.dayPlans as plan (plan.id)}
 					{@const stops = stopsForPlan(plan.id)}
 					{@const anchor = planAnchor(plan)}
-					{@const directions = dayPlanDirectionsLink(stops, anchorPlace(anchor))}
+					{@const route = dayPlanRouteLink(stops, anchor)}
+					{@const directions = route.url}
 					{@const legLinks = googleLegByLegLinks(routePlaces(stops, anchor))}
 					{@const summary = routeSummary(plan, stops, anchor)}
 					{@const weather = data.weatherByPlan?.[plan.id]}
@@ -1711,9 +1716,18 @@
 								{/if}
 							</div>
 							<div class="dayplan-actions">
-								{#if directions}
+								{#if directions && !route.unreliable}
 									<a class="btn small primary" href={directions} target="_blank" rel="noopener"
 										>Open directions</a
+									>
+								{:else if directions && route.unreliable}
+									<!-- Google silently drops waypoints past 3 on a phone and truncates
+									     past 2048 chars, so a link here would quietly lie. The
+									     leg-by-leg links below cover the same route reliably. -->
+									<span class="route-capped"
+										>{route.reason === 'length'
+											? 'Route too long for one Maps link'
+											: 'Too many stops for one Maps link'} — use the Leg links below</span
 									>
 								{:else if stops.length === 1}
 									<a
@@ -1722,6 +1736,24 @@
 										target="_blank"
 										rel="noopener">Open map</a
 									>
+								{/if}
+								{#if stops.length > 0}
+									{@const exportBase = `/trips/${data.trip.id}/dayplan/${plan.id}`}
+									<a
+										class="btn small"
+										href="{exportBase}/export?format=txt&units={distanceUnit}"
+										title="plain text to paste into Messages">Share text</a
+									>
+									<a class="btn small" href="{exportBase}/print?units={distanceUnit}"
+										>🖨 Print / PDF</a
+									>
+									{#if plan.optional_date}
+										<a
+											class="btn small"
+											href="{exportBase}/export?format=ics&units={distanceUnit}"
+											title="add to Calendar as an all-day event">Calendar</a
+										>
+									{/if}
 								{/if}
 								{#if !isViewer}
 									<button
@@ -4639,6 +4671,11 @@
 		color: var(--muted);
 		font-size: 0.85rem;
 		margin: 4px 0 0;
+	}
+	.route-capped {
+		color: var(--muted);
+		font-size: 0.85rem;
+		align-self: center;
 	}
 	.drive-leg {
 		color: var(--muted);

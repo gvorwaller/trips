@@ -50,6 +50,19 @@ export interface AnchorPlace {
 	lon: number | null;
 }
 
+/**
+ * Strip the picker's grouping prefix from a stored anchor title.
+ *
+ * anchorOptions builds labels as "Place: X" / "Stay: Y" so the dropdown groups
+ * sensibly, and that label is what gets persisted to day_plans.anchor_title.
+ * The prefix is a UI affordance for choosing one; once chosen it reads as noise
+ * ("Drive home to Place: Blue Hill, ME"). Lives here, with the code that adds
+ * the prefix, so the two stay in sync.
+ */
+export function cleanAnchorTitle(title: string): string {
+	return title.replace(/^(Place|Stay|Reservation):\s*/i, '');
+}
+
 export function normTitle(s: string): string {
 	return s
 		.toLowerCase()

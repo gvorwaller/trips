@@ -19,6 +19,8 @@ import { setPackingItemChecked } from '$server/packing';
 import { setStopVisited } from '$server/dayplans';
 import { actions as settingsActions } from '../../routes/settings/+page.server';
 import { actions as placeActions } from '../../routes/trips/[id]/place/[itemId]/+page.server';
+import { GET as dayPlanExport } from '../../routes/trips/[id]/dayplan/[planId]/export/+server';
+import { load as dayPlanPrintLoad } from '../../routes/trips/[id]/dayplan/[planId]/print/+page.server';
 
 const U = {
 	admin: 'dbtest_admin_a',
@@ -37,6 +39,7 @@ let tripA = 0;
 let tripB = 0;
 let packItemA = 0;
 let stopA = 0;
+let planA = 0;
 let attA = 0;
 let tmplA = 0;
 let listA = 0;
@@ -96,7 +99,7 @@ beforeAll(async () => {
 		)
 	).rows[0].id;
 
-	const planA = (
+	planA = (
 		await query<{ id: number }>(
 			`INSERT INTO day_plans (trip_id, title) VALUES ($1, 'A plan') RETURNING id`,
 			[tripA]
@@ -392,4 +395,130 @@ describe('place workspace actions 404 for another account', () => {
 			await expect(action(placeEvent(fields))).rejects.toMatchObject({ status: 404 });
 		});
 	}
+});
+
+/**
+ * Day-plan export is a NEW downloadable data surface: a single GET returns the
+ * whole day's stops, notes and coordinates as text. It is reachable by viewers
+ * on purpose (GET only, no hooks change), so it has to be probed the same way
+ * the mutating paths are.
+ */
+describe('day plan export stays owner-scoped', () => {
+	function exportEvent(ownerId: number, userId: number, role: string, planId = planA) {
+		return {
+			params: { id: String(tripA), planId: String(planId) },
+			locals: {
+				user: { id: userId, username: 'x', role, display_name: 'x', views_user_id: null },
+				ownerId
+			},
+			url: new URL('http://localhost/x?format=txt')
+		} as never;
+	}
+
+	for (const format of ['txt', 'md', 'ics']) {
+		it(`${format}: B cannot export A's day plan`, async () => {
+			const event = {
+				params: { id: String(tripA), planId: String(planA) },
+				locals: {
+					user: { id: b, username: U.user, role: 'user', display_name: 'B', views_user_id: null },
+					ownerId: b
+				},
+				url: new URL(`http://localhost/x?format=${format}`)
+			} as never;
+			await expect(dayPlanExport(event)).rejects.toMatchObject({ status: 404 });
+		});
+	}
+
+	it('the print route also 404s for another account', async () => {
+		await expect(dayPlanPrintLoad(exportEvent(b, b, 'user'))).rejects.toMatchObject({
+			status: 404
+		});
+	});
+
+	it("A can export A's own day plan", async () => {
+		const res = await dayPlanExport(exportEvent(a, a, 'admin'));
+		expect(res.status).toBe(200);
+		expect(await res.text()).toContain('A plan');
+	});
+
+	it("viewer V can export the account it reads — sharing a day is a read", async () => {
+		const res = await dayPlanExport(exportEvent(a, v, 'viewer'));
+		expect(res.status).toBe(200);
+	});
+
+	it('a plan id from another trip 404s even for its owner', async () => {
+		const otherPlan = (
+			await query<{ id: number }>(
+				`INSERT INTO day_plans (trip_id, title) VALUES ($1, 'B plan') RETURNING id`,
+				[tripB]
+			)
+		).rows[0].id;
+		await expect(dayPlanExport(exportEvent(a, a, 'admin', otherPlan))).rejects.toMatchObject({
+			status: 404
+		});
+	});
+});
+
+/**
+ * Response-level contract for the export routes: private cache policy, and a
+ * clear boundary between "the user must fix this" (400) and "we are broken"
+ * (500). A blanket try/catch around the builder used to relabel every internal
+ * failure as a bad request.
+ */
+describe('day plan export response contract', () => {
+	function ev(format: string, planId = planA, extra = '') {
+		return {
+			params: { id: String(tripA), planId: String(planId) },
+			locals: {
+				user: { id: a, username: U.admin, role: 'admin', display_name: 'A', views_user_id: null },
+				ownerId: a
+			},
+			url: new URL(`http://localhost/x?format=${format}${extra}`)
+		} as never;
+	}
+
+	for (const format of ['txt', 'md']) {
+		it(`${format}: is marked private and no-store`, async () => {
+			const res = await dayPlanExport(ev(format));
+			expect(res.headers.get('cache-control')).toBe('private, no-store');
+			expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+		});
+	}
+
+	it('md is served as a download, txt inline for select-and-paste', async () => {
+		expect((await dayPlanExport(ev('md'))).headers.get('content-disposition')).toContain(
+			'attachment'
+		);
+		expect((await dayPlanExport(ev('txt'))).headers.get('content-disposition')).toBeNull();
+	});
+
+	it('rejects an unknown format before doing any work', async () => {
+		await expect(dayPlanExport(ev('xml'))).rejects.toMatchObject({ status: 400 });
+	});
+
+	it('an undated plan is a 400 with an actionable message, not a 500', async () => {
+		// A plan is dateless by default; the fixture plan has no optional_date.
+		await expect(dayPlanExport(ev('ics'))).rejects.toMatchObject({
+			status: 400,
+			body: { message: expect.stringContaining('Add a date') }
+		});
+	});
+
+	it('a dated plan exports a calendar file', async () => {
+		await query(`UPDATE day_plans SET optional_date = '2026-07-29' WHERE id = $1`, [planA]);
+		const res = await dayPlanExport(ev('ics'));
+		expect(res.headers.get('content-type')).toContain('text/calendar');
+		expect(res.headers.get('cache-control')).toBe('private, no-store');
+		const body = await res.text();
+		expect(body).toContain('BEGIN:VCALENDAR');
+		expect(body).toContain('DTSTART;VALUE=DATE:20260729');
+		await query(`UPDATE day_plans SET optional_date = NULL WHERE id = $1`, [planA]);
+	});
+
+	it('AI notes are opt-in in the text export', async () => {
+		await query(`UPDATE day_plan_stops SET ai_notes = 'ZZAINOTE' WHERE id = $1`, [stopA]);
+		expect(await (await dayPlanExport(ev('txt'))).text()).not.toContain('ZZAINOTE');
+		expect(await (await dayPlanExport(ev('txt', planA, '&ai=1'))).text()).toContain('ZZAINOTE');
+		await query(`UPDATE day_plan_stops SET ai_notes = NULL WHERE id = $1`, [stopA]);
+	});
 });
