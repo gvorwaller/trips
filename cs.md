@@ -69,7 +69,8 @@ Server-side fetch only: ~3s timeout, response-size cap, block private/loopback/l
 ## CSS & UI
 - **No Tailwind / utility frameworks** — component-scoped `<style>` only; tokens in `src/app.css` (from birds `docs/mockups/mockup.css`).
 - **No toast notifications** — modal confirmation dialogs.
-- Mobile-first; breakpoints `640px` / `1024px` only; fixed bottom-nav + drawer <640px; top-nav ≥640px; ≥48px tap targets; ≥16px input font; WCAG AAA 7:1 contrast; status uses color + text label.
+- Mobile-first; breakpoints `640px` / `1024px` only; fixed bottom-nav + drawer <640px; top-nav ≥640px; ≥16px input font; WCAG AAA 7:1 contrast; status uses color + text label.
+- **Tap targets**: ≥44px (WCAG 2.5.5 Target Size (Enhanced, AAA) and Apple HIG are both 44×44); **≥48px for primary actions, bottom-nav items, and any standalone control not inside a dense list row**. Amended 2026-08-02 from a blanket ≥48px, which was Material's number and was never required by the WCAG AAA bar this document claims — see `docs/2026-08-02-open-tracker-batch-plan.md` §F.
 
 ---
 
