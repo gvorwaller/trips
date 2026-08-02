@@ -26,6 +26,14 @@
 	} from '$lib/route';
 	import { dayPlanRouteLink } from '$lib/dayplan-export';
 	import {
+		collapsedKeys,
+		isCollapsed,
+		parseCollapseState,
+		serializeCollapseState,
+		toggleCollapse,
+		type CollapseMap
+	} from '$lib/collapse-state';
+	import {
 		routeSummary as drivingRouteSummary,
 		legSummary as drivingLegSummary,
 		returnLegSummary as drivingReturnSummary
@@ -1216,6 +1224,11 @@
 	const packKey = $derived(`trips:${data.trip.id}:packCollapsed`);
 	const distanceUnitKey = $derived(`trips:${data.trip.id}:distanceUnit`);
 
+	/** Shared empty set, so the printing branch doesn't allocate per render. */
+	const EMPTY_FOLD: Set<number> = new Set();
+	// True only while a print snapshot is being taken. Every fold predicate
+	// consults it, so nothing collapsed is missing from the printed sheet.
+	let printing = $state(false);
 	let itinCollapsed = $state<Set<number>>(new Set());
 	let packCollapsed = $state<Set<number>>(new Set());
 
@@ -1364,7 +1377,10 @@
 	const packIndeterminate = (s?: { leaves: number; checked: number }) =>
 		!!s && s.checked > 0 && s.checked < s.leaves;
 
-	const itinHidden = $derived(hiddenIds(data.itineraryRows, itinCollapsed));
+	// Printing expands both trees too: a collapsed branch is absent from the DOM,
+	// so without this the printed sheet silently loses every folded Places and
+	// Packing descendant — the same regression the `printing` flag exists to stop.
+	const itinHidden = $derived(hiddenIds(data.itineraryRows, printing ? EMPTY_FOLD : itinCollapsed));
 	const itinParents = $derived(parentIds(data.itineraryRows));
 	const placesVisibleRows = $derived.by(() => {
 		if (placesQuery) return data.itineraryRows.filter(({ node }) => placesVisibleIds.has(node.id));
@@ -1406,46 +1422,57 @@
 
 	// ── Section-level collapse (Places / Packing / Reservations / Documents) ──
 	const sectionKey = $derived(`trips:${data.trip.id}:sections`);
-	let sectionsCollapsed = $state<Set<string>>(new Set());
-	onMount(() => {
-		try {
-			const v = JSON.parse(localStorage.getItem(sectionKey) ?? '[]');
-			sectionsCollapsed = new Set(
-				Array.isArray(v) ? v.filter((s: unknown) => typeof s === 'string') : []
-			);
-		} catch {
-			/* use empty set */
-		}
-	});
-	function saveSections(s: Set<string>) {
-		if (browser) localStorage.setItem(sectionKey, JSON.stringify([...s]));
-	}
+	let sections = $state<CollapseMap>({});
 	function toggleSection(name: string) {
-		const next = new Set(sectionsCollapsed);
-		if (next.has(name)) next.delete(name);
-		else next.add(name);
-		saveSections(next);
-		sectionsCollapsed = next;
+		sections = toggleCollapse(sections, name, false);
+		if (browser) localStorage.setItem(sectionKey, serializeCollapseState(sections));
 	}
+	// `printing` short-circuits every fold predicate, so the section is collapsed
+	// only when the user says so AND we are not rendering for print.
+	const sectionCollapsed = (name: string) => !printing && isCollapsed(sections, name, false);
 
-	// Print a one-page trip sheet (td-a2d073). Collapsed branches are removed from
-	// the DOM, so expand everything first (in memory only — don't persist to
-	// localStorage), render, print, then restore the user's fold state.
+	// ── Per-plan collapse (td-1372a5) ──
+	// Day plans start COLLAPSED so the section reads as an index of days rather
+	// than a wall of stops. Expressing that needs the tri-state map above: the
+	// old Set-of-collapsed-ids could not record "this one is open".
+	const dayPlanCardKey = $derived(`trips:${data.trip.id}:dayplanCards`);
+	let dayPlanCards = $state<CollapseMap>({});
+	const DAY_PLAN_DEFAULT_COLLAPSED = true;
+	function toggleDayPlanCard(planId: number) {
+		dayPlanCards = toggleCollapse(dayPlanCards, planId, DAY_PLAN_DEFAULT_COLLAPSED);
+		if (browser) localStorage.setItem(dayPlanCardKey, serializeCollapseState(dayPlanCards));
+	}
+	const dayPlanCollapsed = (planId: number) =>
+		!printing && isCollapsed(dayPlanCards, planId, DAY_PLAN_DEFAULT_COLLAPSED);
+
+	onMount(() => {
+		sections = parseCollapseState(localStorage.getItem(sectionKey));
+		dayPlanCards = parseCollapseState(localStorage.getItem(dayPlanCardKey));
+	});
+
+	// Print a one-page trip sheet (td-a2d073).
+	//
+	// Collapsed branches are removed from the DOM, so everything must be expanded
+	// while the print snapshot is taken. This used to clear the three fold sets
+	// and restore them in a `finally`, which had two problems: under a map,
+	// "cleared" no longer means expanded (an explicit `true` survives), and
+	// window.print() can return before the dialog closes or the snapshot is
+	// taken, so `finally` could re-hide content mid-print.
+	//
+	// Instead one flag overrides every predicate — sections, day-plan cards, and
+	// both trees — and it is lowered on `afterprint`, with a timeout only as a
+	// fallback for browsers that never fire it.
 	function printSheet() {
-		const savedItin = itinCollapsed;
-		const savedPack = packCollapsed;
-		const savedSections = sectionsCollapsed;
-		itinCollapsed = new Set();
-		packCollapsed = new Set();
-		sectionsCollapsed = new Set();
+		printing = true;
 		flushSync();
-		try {
-			window.print();
-		} finally {
-			itinCollapsed = savedItin;
-			packCollapsed = savedPack;
-			sectionsCollapsed = savedSections;
-		}
+		const done = () => {
+			printing = false;
+			window.removeEventListener('afterprint', done);
+			clearTimeout(fallback);
+		};
+		window.addEventListener('afterprint', done);
+		const fallback = setTimeout(done, 60_000);
+		window.print();
 	}
 
 	const packingPrintHref = $derived(
@@ -1568,7 +1595,7 @@
 <div class="card dayplans-card">
 	<div class="section-header">
 		<button class="section-toggle" type="button" onclick={() => toggleSection('dayplans')}>
-			<span class="section-caret">{sectionsCollapsed.has('dayplans') ? '▸' : '▾'}</span>
+			<span class="section-caret">{sectionCollapsed('dayplans') ? '▸' : '▾'}</span>
 			<h2>Day Plans</h2>
 			<span class="count-badge">{data.dayPlans.length}</span>
 		</button>
@@ -1591,7 +1618,7 @@
 		{/if}
 	</div>
 
-	{#if !sectionsCollapsed.has('dayplans')}
+	{#if !sectionCollapsed('dayplans')}
 		<details class="dayplan-help">
 			<summary>How day plans work</summary>
 			<div class="dayplan-help-body">
@@ -1782,8 +1809,23 @@
 							</div>
 						</div>
 
-						<details class="dayplan-details" open>
-							<summary>Stops ({planProgress(stops)})</summary>
+						<!-- The app's own disclosure rather than <details open>: <details>
+						     fires ontoggle during hydration and during the programmatic
+						     print expansion, which fights the persisted state. This also
+						     matches the six section-toggle controls elsewhere. -->
+						<button
+							type="button"
+							class="dayplan-toggle"
+							aria-expanded={!dayPlanCollapsed(plan.id)}
+							onclick={() => toggleDayPlanCard(plan.id)}
+						>
+							<span class="section-caret">{dayPlanCollapsed(plan.id) ? '▸' : '▾'}</span>
+							<span>Stops ({planProgress(stops)})</span>
+							{#if dayPlanCollapsed(plan.id) && summary}
+								<span class="muted collapsed-summary">{summary}</span>
+							{/if}
+						</button>
+						{#if !dayPlanCollapsed(plan.id)}
 							<div class="dayplan-stops-section">
 								{#if stops.length === 0}
 									<p class="muted">No stops saved.</p>
@@ -2101,7 +2143,7 @@
 									{/if}
 								{/if}
 							</div>
-						</details>
+						{/if}
 
 						{#if !isViewer}
 							<details class="edit">
@@ -2358,7 +2400,7 @@
 <div class="card" id="places">
 	<div class="section-header">
 		<button class="section-toggle" type="button" onclick={() => toggleSection('places')}>
-			<span class="section-caret">{sectionsCollapsed.has('places') ? '▸' : '▾'}</span>
+			<span class="section-caret">{sectionCollapsed('places') ? '▸' : '▾'}</span>
 			<h2>Places</h2>
 		</button>
 		<a class="btn small places-schedule-btn" href="/trips/{data.trip.id}/places/schedule">
@@ -2366,7 +2408,7 @@
 		</a>
 	</div>
 
-	{#if !sectionsCollapsed.has('places')}
+	{#if !sectionCollapsed('places')}
 		{#if data.itineraryRows.length > 0}
 			<PinMap {pins} onselect={selectPin} />
 		{/if}
@@ -2886,14 +2928,14 @@
 <div class="card packing-card">
 	<div class="section-header">
 		<button class="section-toggle" type="button" onclick={() => toggleSection('packing')}>
-			<span class="section-caret">{sectionsCollapsed.has('packing') ? '▸' : '▾'}</span>
+			<span class="section-caret">{sectionCollapsed('packing') ? '▸' : '▾'}</span>
 			<h2>Packing</h2>
 		</button>
 		<a class="btn small packing-print-btn" href={packingPrintHref}>🖨 Print packing</a>
 	</div>
-	{#if !sectionsCollapsed.has('packing')}
+	{#if !sectionCollapsed('packing')}
 		{#each data.packing as { list, rows, total, checked } (list.id)}
-			{@const packHidden = hiddenIds(rows, packCollapsed)}
+			{@const packHidden = hiddenIds(rows, printing ? EMPTY_FOLD : packCollapsed)}
 			{@const packParents = parentIds(rows)}
 			{@const packStats = leafStats(rows)}
 			<section class="plist">
@@ -3138,10 +3180,10 @@
 <!-- ── RESERVATIONS ───────────────────────────────────── -->
 <div class="card">
 	<button class="section-toggle" type="button" onclick={() => toggleSection('reservations')}>
-		<span class="section-caret">{sectionsCollapsed.has('reservations') ? '▸' : '▾'}</span>
+		<span class="section-caret">{sectionCollapsed('reservations') ? '▸' : '▾'}</span>
 		<h2>Reservations</h2>
 	</button>
-	{#if !sectionsCollapsed.has('reservations')}
+	{#if !sectionCollapsed('reservations')}
 		{#if data.reservations.length === 0}
 			<p class="muted">No reservations yet.</p>
 		{:else}
@@ -3362,10 +3404,10 @@
 <!-- ── ATTACHMENTS ────────────────────────────────────── -->
 <div class="card">
 	<button class="section-toggle" type="button" onclick={() => toggleSection('documents')}>
-		<span class="section-caret">{sectionsCollapsed.has('documents') ? '▸' : '▾'}</span>
+		<span class="section-caret">{sectionCollapsed('documents') ? '▸' : '▾'}</span>
 		<h2>Documents</h2>
 	</button>
-	{#if !sectionsCollapsed.has('documents')}
+	{#if !sectionCollapsed('documents')}
 		{#if data.attachments.length === 0}
 			<p class="muted">No documents yet.</p>
 		{:else}
@@ -3472,11 +3514,11 @@
 <!-- ── EXPENSES ──────────────────────────────────────── -->
 <div class="card">
 	<button class="section-toggle" type="button" onclick={() => toggleSection('expenses')}>
-		<span class="section-caret">{sectionsCollapsed.has('expenses') ? '▸' : '▾'}</span>
+		<span class="section-caret">{sectionCollapsed('expenses') ? '▸' : '▾'}</span>
 		<h2>Expenses</h2>
 		<span class="expense-total">{fmtAmount(expenseTotal)}</span>
 	</button>
-	{#if !sectionsCollapsed.has('expenses')}
+	{#if !sectionCollapsed('expenses')}
 		{#if data.expenses.length === 0}
 			<p class="muted">No expenses yet.</p>
 		{:else}
@@ -4558,14 +4600,27 @@
 		flex-wrap: wrap;
 		justify-content: flex-end;
 	}
-	.dayplan-details {
+	.dayplan-toggle {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+		width: 100%;
 		margin-top: 8px;
-	}
-	.dayplan-details > summary {
+		padding: 8px 0;
+		min-height: 44px;
+		background: none;
+		border: 0;
+		text-align: left;
 		cursor: pointer;
 		color: var(--link);
 		font-size: 0.85rem;
 		font-weight: 600;
+	}
+	/* The driving total, shown only while collapsed, so a folded card still says
+	   enough to choose between days. */
+	.dayplan-toggle .collapsed-summary {
+		font-weight: 400;
 	}
 	.dayplan-stops-section {
 		margin-top: 8px;
