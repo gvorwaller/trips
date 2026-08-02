@@ -24,6 +24,17 @@
 		type DrivingLeg,
 		type RouteStop
 	} from '$lib/route';
+	import {
+		routeSummary as drivingRouteSummary,
+		legSummary as drivingLegSummary,
+		returnLegSummary as drivingReturnSummary
+	} from '$lib/dayplan-driving';
+	import {
+		anchorOptions as buildAnchorOptions,
+		anchorFromValue as resolveAnchor,
+		type AnchorOption,
+		type PlanAnchor
+	} from '$lib/dayplan-anchor';
 	import type { PageData } from './$types';
 
 	type ActionData = {
@@ -383,12 +394,6 @@
 	type ItinNode = PageData['itineraryRows'][number]['node'];
 	type DayPlan = PageData['dayPlans'][number];
 	type DayPlanStop = PageData['dayPlanStops'][number];
-	type PlanAnchor = {
-		source: string;
-		title: string;
-		lat: number;
-		lon: number;
-	};
 	const toPlace = (n: ItinNode): MapPlace => ({
 		name: n.title,
 		lat: n.lat,
@@ -540,93 +545,33 @@
 		};
 	}
 
-	type AnchorOption = {
-		value: string;
-		label: string;
-		title: string;
-		lat: number | null;
-		lon: number | null;
-	};
-
-	function normTitle(s: string): string {
-		return s
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, ' ')
-			.trim();
-	}
-
-	function dateMatchesReservation(
-		planDate: string | null,
-		reservation: PageData['reservations'][number]
-	) {
-		if (!planDate || (!reservation.start_at && !reservation.end_at)) return true;
-		const start = reservation.start_at?.slice(0, 10) ?? null;
-		const end = reservation.end_at?.slice(0, 10) ?? start;
-		if (!start) return true;
-		return planDate >= start && planDate <= (end ?? start);
-	}
-
-	function matchingPlaceForReservation(reservation: PageData['reservations'][number]) {
-		const target = normTitle(reservation.title);
-		return dayPlanPlaces.find(({ node }) => {
-			if (node.lat == null || node.lon == null) return false;
-			const place = normTitle(node.title);
-			return place === target || place.includes(target) || target.includes(place);
-		});
-	}
+	/**
+	 * Anchor options/resolution live in $lib/dayplan-anchor (pure + unit tested).
+	 * These wrappers only supply this page's reservations and located places.
+	 */
+	const anchorPlaceList = $derived(
+		dayPlanPlaces.map(({ node }) => ({
+			id: node.id,
+			title: node.title,
+			lat: node.lat,
+			lon: node.lon
+		}))
+	);
 
 	function anchorOptions(
 		planDate: string | null,
 		currentAnchor: PlanAnchor | null = null
 	): AnchorOption[] {
-		const options: AnchorOption[] = [
-			{ value: 'none', label: 'No anchor', title: '', lat: null, lon: null }
-		];
-		for (const reservation of data.reservations) {
-			if (
-				reservation.reservation_type !== 'accommodation' ||
-				!dateMatchesReservation(planDate, reservation)
-			) {
-				continue;
-			}
-			const place = matchingPlaceForReservation(reservation);
-			if (place?.node.lat != null && place.node.lon != null) {
-				options.push({
-					value: `res:${reservation.id}`,
-					label: `Stay: ${reservation.title}`,
-					title: `Stay: ${reservation.title}`,
-					lat: place.node.lat,
-					lon: place.node.lon
-				});
-			}
-		}
-		for (const { node } of dayPlanPlaces) {
-			if (node.lat == null || node.lon == null) continue;
-			options.push({
-				value: `place:${node.id}`,
-				label: `Place: ${node.title}`,
-				title: `Place: ${node.title}`,
-				lat: node.lat,
-				lon: node.lon
-			});
-		}
-		if (currentAnchor && !options.some((option) => option.value === currentAnchor.source)) {
-			options.push({
-				value: currentAnchor.source,
-				label: currentAnchor.title,
-				title: currentAnchor.title,
-				lat: currentAnchor.lat,
-				lon: currentAnchor.lon
-			});
-		}
-		return options;
+		return buildAnchorOptions(planDate, data.reservations, anchorPlaceList, currentAnchor);
 	}
 
-	function anchorFromValue(value: string, planDate: string | null): PlanAnchor | null {
-		const option = anchorOptions(planDate).find((o) => o.value === value);
-		return option?.lat != null && option.lon != null
-			? { source: option.value, title: option.title, lat: option.lat, lon: option.lon }
-			: null;
+	/** Always pass a saved plan's persisted anchor — see $lib/dayplan-anchor. */
+	function anchorFromValue(
+		value: string,
+		planDate: string | null,
+		currentAnchor: PlanAnchor | null = null
+	): PlanAnchor | null {
+		return resolveAnchor(value, planDate, data.reservations, anchorPlaceList, currentAnchor);
 	}
 
 	function anchorPlace(anchor: PlanAnchor | null): MapPlace | null {
@@ -754,21 +699,14 @@
 		return orderedIds.map((id) => byId.get(id)).filter((s): s is BuilderStop => !!s);
 	}
 
-	function persistedDrivingSummary(stops: DayPlanStop[], anchor: PlanAnchor | null): string | null {
-		const legs = anchor ? stops : stops.slice(1);
-		if (legs.length === 0 || !legs.every((s) => s.drive_km != null && s.drive_min != null)) {
-			return null;
-		}
-		const km = legs.reduce((sum, s) => sum + (s.drive_km ?? 0), 0);
-		const min = legs.reduce((sum, s) => sum + (s.drive_min ?? 0), 0);
-		return `${fmtDistance(km)}, ${formatDuration(min)}`;
-	}
-
-	function routeSummary(stops: DayPlanStop[], anchor: PlanAnchor | null): string | null {
-		const driving = persistedDrivingSummary(stops, anchor);
-		if (driving) return driving;
-		const straight = routeDistance(routePlaces(stops, anchor));
-		return straight ? `~${straight} straight-line` : null;
+	// Driving summaries live in $lib/dayplan-driving so the page and server-side
+	// exports render the same numbers. These wrappers only bind the current unit.
+	function routeSummary(
+		plan: DayPlan,
+		stops: DayPlanStop[],
+		anchor: PlanAnchor | null
+	): string | null {
+		return drivingRouteSummary(plan, stops, anchor, distanceUnit);
 	}
 
 	function legSummary(
@@ -776,31 +714,15 @@
 		stop: DayPlanStop,
 		anchor: PlanAnchor | null
 	): string | null {
-		if (stop.drive_km != null && stop.drive_min != null) {
-			return `${fmtDistance(stop.drive_km)}, ${formatDuration(stop.drive_min)}`;
-		}
-		if (
-			!prev &&
-			anchor &&
-			typeof stop.snapshot_lat === 'number' &&
-			typeof stop.snapshot_lon === 'number'
-		) {
-			return `~${fmtDistance(
-				haversineKm(anchor.lat, anchor.lon, stop.snapshot_lat, stop.snapshot_lon)
-			)} straight-line`;
-		}
-		if (
-			prev &&
-			typeof prev.snapshot_lat === 'number' &&
-			typeof prev.snapshot_lon === 'number' &&
-			typeof stop.snapshot_lat === 'number' &&
-			typeof stop.snapshot_lon === 'number'
-		) {
-			return `~${fmtDistance(
-				haversineKm(prev.snapshot_lat, prev.snapshot_lon, stop.snapshot_lat, stop.snapshot_lon)
-			)} straight-line`;
-		}
-		return null;
+		return drivingLegSummary(prev, stop, anchor, distanceUnit);
+	}
+
+	function returnSummary(
+		plan: DayPlan,
+		stops: DayPlanStop[],
+		anchor: PlanAnchor | null
+	): string | null {
+		return drivingReturnSummary(plan, stops, anchor, distanceUnit);
 	}
 
 	function setRouteStatus(planId: number, message: string) {
@@ -837,10 +759,17 @@
 		stops: DayPlanStop[],
 		anchor: PlanAnchor | null
 	): Promise<void> {
-		const legs = await computeLegDistances(MAPS_API_KEY, savedRouteStops(stops), anchor);
+		const { legs, returnLeg } = await computeLegDistances(
+			MAPS_API_KEY,
+			savedRouteStops(stops),
+			anchor
+		);
 		const fd = new FormData();
 		fd.set('plan_id', String(planId));
 		fd.set('legs', JSON.stringify(legs));
+		// Anchored plans close the loop; the server rejects a return leg without
+		// an anchor and requires one with it.
+		if (returnLeg) fd.set('return_leg', JSON.stringify(returnLeg));
 		await postAction('dayplan-set-driving', fd);
 	}
 
@@ -857,7 +786,6 @@
 		try {
 			await persistDriving(planId, stops, anchor);
 			setRouteStatus(planId, 'Driving distances updated.');
-			await invalidateAll();
 		} catch (err) {
 			setRouteStatus(
 				planId,
@@ -865,12 +793,20 @@
 			);
 		} finally {
 			dayPlanRouteBusy = null;
+			// Always resync, so a failure shows the server's real state rather than
+			// whatever was on screen before.
+			await invalidateAll();
 		}
 	}
 
-	async function setSavedPlanAnchor(planId: number, planDate: string | null, value: string) {
+	async function setSavedPlanAnchor(
+		planId: number,
+		planDate: string | null,
+		value: string,
+		currentAnchor: PlanAnchor | null = null
+	) {
 		savedPlanAnchors = { ...savedPlanAnchors, [planId]: value };
-		const anchor = anchorFromValue(value, planDate);
+		const anchor = anchorFromValue(value, planDate, currentAnchor);
 		const fd = new FormData();
 		fd.set('plan_id', String(planId));
 		fd.set('anchor_source', anchor?.source ?? '');
@@ -889,9 +825,10 @@
 		planId: number,
 		planDate: string | null,
 		selectedAnchor: string,
-		stops: DayPlanStop[]
+		stops: DayPlanStop[],
+		currentAnchor: PlanAnchor | null = null
 	) {
-		const anchor = anchorFromValue(selectedAnchor || 'none', planDate);
+		const anchor = anchorFromValue(selectedAnchor || 'none', planDate, currentAnchor);
 		dayPlanRouteBusy = planId;
 		try {
 			let orderedIds: number[] | undefined;
@@ -936,11 +873,15 @@
 			} else {
 				setRouteStatus(planId, 'Route optimized using straight-line fallback.');
 			}
-			await invalidateAll();
 		} catch (err) {
 			setRouteStatus(planId, err instanceof Error ? err.message : 'Could not optimize route.');
 		} finally {
 			dayPlanRouteBusy = null;
+			// Refresh even on failure. Reordering clears the saved driving data
+			// before the new legs are written, so a failed persist leaves the page
+			// painting totals that no longer exist on the server — numbers the user
+			// would reasonably believe were saved.
+			await invalidateAll();
 		}
 	}
 
@@ -1724,7 +1665,7 @@
 					{@const anchor = planAnchor(plan)}
 					{@const directions = dayPlanDirectionsLink(stops, anchorPlace(anchor))}
 					{@const legLinks = googleLegByLegLinks(routePlaces(stops, anchor))}
-					{@const summary = routeSummary(stops, anchor)}
+					{@const summary = routeSummary(plan, stops, anchor)}
 					{@const weather = data.weatherByPlan?.[plan.id]}
 					<article class="dayplan-card" data-plan-id={plan.id}>
 						<div class="dayplan-head">
@@ -1821,7 +1762,12 @@
 												aria-label="route anchor"
 												value={savedPlanAnchors[plan.id] ?? plan.anchor_source ?? 'none'}
 												onchange={(e) =>
-													setSavedPlanAnchor(plan.id, plan.optional_date, e.currentTarget.value)}
+													setSavedPlanAnchor(
+														plan.id,
+														plan.optional_date,
+														e.currentTarget.value,
+														anchor
+													)}
 											>
 												{#each anchorOptions(plan.optional_date, anchor) as anchorOption (anchorOption.value)}
 													<option value={anchorOption.value}>{anchorOption.label}</option>
@@ -1846,7 +1792,8 @@
 														plan.id,
 														plan.optional_date,
 														savedPlanAnchors[plan.id] ?? plan.anchor_source ?? 'none',
-														stops
+														stops,
+														anchor
 													)}
 											>
 												Optimize order
@@ -1956,6 +1903,14 @@
 												{/if}
 											</li>
 										{/each}
+										{#if anchor}
+											{@const home = returnSummary(plan, stops, anchor)}
+											{#if home}
+												<li class="dayplan-return-stop">
+													<div class="drive-leg">Drive home to {anchor.title}: {home}</div>
+												</li>
+											{/if}
+										{/if}
 									</ol>
 								{/if}
 

@@ -19,6 +19,17 @@ export interface OptimizeResult {
 	totalMin: number;
 }
 
+/** The closing drive from the last stop back to the anchor. Anchored plans only. */
+export interface ReturnLeg {
+	km: number;
+	min: number;
+}
+
+export interface DrivingLegs {
+	legs: DrivingLeg[];
+	returnLeg: ReturnLeg | null;
+}
+
 interface AnchorPoint {
 	lat: number;
 	lon: number;
@@ -82,12 +93,23 @@ function totals(route: {
 /**
  * Compute driving distance/duration for each leg in the current stop order.
  * Returned stopId is the destination stop for the leg from the previous stop.
+ *
+ * An anchored plan is a CLOSED LOOP: anchor -> every stop -> back to the anchor.
+ * Google returns stops.length + 1 legs for that shape; legs 0..n-1 belong to
+ * stops 0..n-1, and the final leg is the drive home, returned separately as
+ * returnLeg because it has no destination stop to attach to. This matches
+ * optimizeDrivingRoute, which has always modelled the anchored day as a loop —
+ * the disagreement between the two was td-bf2909, and it made every anchored
+ * plan's saved total short by the drive home.
+ *
+ * An unanchored plan stays an open path (first stop -> last stop, n-1 legs) and
+ * gets returnLeg: null. There is no base to return to.
  */
 export async function computeLegDistances(
 	apiKey: string,
 	stops: RouteStop[],
 	anchor: AnchorPoint | null = null
-): Promise<DrivingLeg[]> {
+): Promise<DrivingLegs> {
 	const located = requireAllLocated(stops);
 	if (located.length < (anchor ? 1 : 2)) {
 		throw new Error(
@@ -98,8 +120,8 @@ export async function computeLegDistances(
 
 	const service = await directionsService(apiKey);
 	const origin = anchor ?? located[0];
-	const destination = located[located.length - 1];
-	const waypointSource = anchor ? located.slice(0, -1) : located.slice(1, -1);
+	const destination = anchor ?? located[located.length - 1];
+	const waypointSource = anchor ? located : located.slice(1, -1);
 	const waypoints = waypointSource.map((s) => ({
 		location: { lat: s.lat, lng: s.lon },
 		stopover: true
@@ -115,13 +137,32 @@ export async function computeLegDistances(
 
 	const route = result?.routes?.[0];
 	if (!route) throw new Error('No drivable route found.');
-	return (route.legs ?? []).map(
-		(leg: { distance?: { value?: number }; duration?: { value?: number } }, i: number) => ({
-			stopId: located[anchor ? i : i + 1].id,
-			km: (leg.distance?.value ?? 0) / 1000,
-			min: Math.round((leg.duration?.value ?? 0) / 60)
-		})
-	);
+
+	// Reject partial responses before attributing anything. Without this, a short
+	// leg array would slide the mapping and silently label some intermediate leg
+	// as the drive home — a wrong number wearing the label of the fix.
+	const rawLegs: Array<{ distance?: { value?: number }; duration?: { value?: number } }> =
+		route.legs ?? [];
+	const expected = anchor ? located.length + 1 : located.length - 1;
+	if (rawLegs.length !== expected) {
+		throw new Error(
+			`Directions returned ${rawLegs.length} legs for ${located.length} stops; expected ${expected}.`
+		);
+	}
+
+	const toLeg = (leg: { distance?: { value?: number }; duration?: { value?: number } }) => ({
+		km: (leg.distance?.value ?? 0) / 1000,
+		min: Math.round((leg.duration?.value ?? 0) / 60)
+	});
+
+	// Anchored: leg i ends at stop i. Unanchored: leg i ends at stop i + 1.
+	const stopLegs = anchor ? rawLegs.slice(0, -1) : rawLegs;
+	const legs: DrivingLeg[] = stopLegs.map((leg, i) => ({
+		stopId: located[anchor ? i : i + 1].id,
+		...toLeg(leg)
+	}));
+
+	return { legs, returnLeg: anchor ? toLeg(rawLegs[rawLegs.length - 1]) : null };
 }
 
 /**

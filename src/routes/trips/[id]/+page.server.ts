@@ -215,6 +215,35 @@ function parseDrivingLegs(raw: string | undefined) {
 	});
 }
 
+/**
+ * The drive home back to the anchor (0013). Absent for unanchored plans, where
+ * bulkUpdateDriving rejects a non-null value.
+ */
+function parseReturnLeg(raw: string | undefined) {
+	if (!raw) return null;
+	let data: unknown;
+	try {
+		data = JSON.parse(raw);
+	} catch {
+		throw error(400, 'Invalid return leg.');
+	}
+	if (!data || typeof data !== 'object') throw error(400, 'Invalid return leg.');
+	const leg = data as { km?: unknown; min?: unknown };
+	const km = Number(leg.km);
+	const min = Number(leg.min);
+	if (
+		!Number.isFinite(km) ||
+		km < 0 ||
+		km > 50000 ||
+		!Number.isFinite(min) ||
+		min < 0 ||
+		min > 100000
+	) {
+		throw error(400, 'Invalid return leg.');
+	}
+	return { km: Math.round(km * 10) / 10, min: Math.max(0, Math.round(min)) };
+}
+
 function parseOrigin(form: FormData): { lat: number; lon: number } | null {
 	const rawLat = form.get('origin_lat')?.toString().trim();
 	const rawLon = form.get('origin_lon')?.toString().trim();
@@ -794,7 +823,8 @@ export const actions: Actions = {
 		const ok = await bulkUpdateDriving(
 			tripId,
 			parseId(form.get('plan_id')),
-			parseDrivingLegs(form.get('legs')?.toString())
+			parseDrivingLegs(form.get('legs')?.toString()),
+			parseReturnLeg(form.get('return_leg')?.toString())
 		);
 		if (!ok) return fail(400, { error: 'Invalid driving legs.' });
 		return { ok: true };

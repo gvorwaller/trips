@@ -12,6 +12,9 @@ export interface DayPlan {
 	anchor_title: string | null;
 	anchor_lat: number | null;
 	anchor_lon: number | null;
+	/** Drive home from the last stop back to the anchor. Anchored plans only (0013). */
+	return_drive_km: number | null;
+	return_drive_min: number | null;
 	created_at: string;
 	updated_at: string;
 }
@@ -73,6 +76,7 @@ export class DuplicateDayPlanStopError extends Error {
 const PLAN_SELECT = `id, trip_id, title, notes,
 	to_char(optional_date, 'YYYY-MM-DD') AS optional_date,
 	anchor_source, anchor_title, anchor_lat, anchor_lon,
+	return_drive_km, return_drive_min,
 	created_at::text AS created_at,
 	updated_at::text AS updated_at`;
 
@@ -370,6 +374,16 @@ export async function createDayPlan(
 	});
 }
 
+/**
+ * Set or clear a plan's route anchor.
+ *
+ * Every persisted driving metric is derived from the anchor — the first leg
+ * starts there and, since 0013, the return leg ends there — so changing it
+ * invalidates all of them. Without the clear, switching a plan's base from A to
+ * B leaves the old legs and the old drive home painted as though they described
+ * the route to B. (This was already wrong for the first leg before 0013 existed;
+ * found in peer review of td-bf2909.)
+ */
 export async function setDayPlanAnchor(
 	tripId: number,
 	planId: number,
@@ -378,6 +392,7 @@ export async function setDayPlanAnchor(
 	return withTransaction(async (client) => {
 		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
 		await assertAnchorIsNewToPlan(client, planId, anchor);
+		await clearDrivingForPlan(client, planId);
 		const res = await client.query(
 			`UPDATE day_plans
 			    SET anchor_source = $3,
@@ -472,6 +487,13 @@ async function reindexStops(client: Pick<pg.PoolClient, 'query'>, planId: number
 	}
 }
 
+/**
+ * Drop every persisted driving metric for a plan: the per-stop legs and the
+ * plan-level return leg (0013). Both are derived from one Directions call over
+ * one stop order and one anchor, so they must always be cleared together —
+ * leaving the return behind would paint a drive home for a route that no longer
+ * exists.
+ */
 async function clearDrivingForPlan(
 	client: Pick<pg.PoolClient, 'query'>,
 	planId: number
@@ -480,6 +502,12 @@ async function clearDrivingForPlan(
 		`UPDATE day_plan_stops
 		    SET drive_km = NULL, drive_min = NULL
 		  WHERE day_plan_id = $1`,
+		[planId]
+	);
+	await client.query(
+		`UPDATE day_plans
+		    SET return_drive_km = NULL, return_drive_min = NULL
+		  WHERE id = $1`,
 		[planId]
 	);
 }
@@ -585,10 +613,20 @@ export async function listStopsForTrip(tripId: number): Promise<DayPlanStop[]> {
 	return res.rows;
 }
 
+/**
+ * Persist one Directions result for a plan: a leg per stop, plus the drive home
+ * when the plan is anchored (0013).
+ *
+ * The return leg is required exactly when the plan has an anchor, and rejected
+ * otherwise — an unanchored plan is an open path with no base to return to, and
+ * day_plans_return_leg_complete would reject it at the DB anyway. Enforcing it
+ * here turns a constraint violation into a clean false.
+ */
 export async function bulkUpdateDriving(
 	tripId: number,
 	planId: number,
-	legs: DrivingLegInput[]
+	legs: DrivingLegInput[],
+	returnLeg: { km: number; min: number } | null = null
 ): Promise<boolean> {
 	return withTransaction(async (client) => {
 		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
@@ -609,6 +647,7 @@ export async function bulkUpdateDriving(
 		) {
 			return false;
 		}
+		if (hasAnchor !== (returnLeg != null)) return false;
 
 		await clearDrivingForPlan(client, planId);
 		for (const leg of legs) {
@@ -619,7 +658,12 @@ export async function bulkUpdateDriving(
 				[leg.stopId, planId, leg.km, leg.min]
 			);
 		}
-		await client.query(`UPDATE day_plans SET updated_at = NOW() WHERE id = $1`, [planId]);
+		await client.query(
+			`UPDATE day_plans
+			    SET return_drive_km = $2, return_drive_min = $3, updated_at = NOW()
+			  WHERE id = $1`,
+			[planId, returnLeg?.km ?? null, returnLeg?.min ?? null]
+		);
 		return true;
 	});
 }
