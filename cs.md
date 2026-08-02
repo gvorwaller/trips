@@ -46,7 +46,7 @@ Five apps share RAM/disk/CPU. Keep `max_memory_restart` modest. Headless-PDF (if
 
 ## Auth & Roles
 - `argon2id` hashes, `sessions` table, 30-day httpOnly `sameSite=strict` cookie (`secure` in prod), sliding expiry. `locals.user` + `locals.ownerId`.
-- Roles: `owner` (full) and `viewer` (read-only) — `users.role CHECK IN ('owner','viewer')`.
+- Roles: `admin` (own data + Users panel in `/settings`), `user` (own data), `viewer` (read-only view of one account via `users.views_user_id`) — `users.role CHECK IN ('admin','user','viewer')`. Data is hard-partitioned per account through `locals.ownerId`; test cross-account and viewer-mode leaks aggressively (`npm run test:db`).
 - **Viewer write exceptions**: viewers may toggle a packing item's `checked` state (`PATCH /api/packing/check`) and a day-plan stop's `visited` state (`PATCH /api/dayplan/visited`); each endpoint must verify nothing else changed. Everything else → 403.
 - Same-origin check on all POST/PUT/PATCH/DELETE (defense-in-depth beyond `sameSite`).
 - Never log secrets, session tokens, Spaces keys, Maps keys, or object keys.
