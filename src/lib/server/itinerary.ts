@@ -20,11 +20,12 @@ export interface ItineraryItem {
 	google_maps_url: string | null;
 	date: string | null;
 	meta: Record<string, unknown> | null;
+	visited: boolean;
 }
 
 const SELECT_COLS = `id, trip_id, parent_id, sort_order, item_type, title, notes,
 	lat, lon, place_id, apple_maps_place_id, external_url, google_maps_url,
-	to_char(date, 'YYYY-MM-DD') AS date, meta`;
+	to_char(date, 'YYYY-MM-DD') AS date, meta, visited`;
 
 /** Flat list of a trip's itinerary items (the client assembles the tree). */
 export async function listItinerary(tripId: number): Promise<ItineraryItem[]> {
@@ -256,4 +257,67 @@ export async function getItem(tripId: number, id: number): Promise<ItineraryItem
 		[id, tripId]
 	);
 	return res.rows[0] ?? null;
+}
+
+/**
+ * Mark a place visited (or not) from the Places tree. The itinerary item is
+ * the single source of truth: the flag fans out to EVERY day-plan stop that
+ * references the item, in one transaction, so no stop copy can disagree — a
+ * place can sit in several plans. Ownership is enforced inside the UPDATE,
+ * same shape as setStopVisited.
+ */
+export async function setItemVisited(
+	ownerId: number,
+	itemId: number,
+	visited: boolean
+): Promise<boolean> {
+	return withTransaction(async (client) => {
+		// item_type = 'place' is part of the AUTHORIZATION, not a nicety: this
+		// endpoint is viewer-whitelisted, and the exception cs.md grants is
+		// "marking a place visited" — sections, days and notes must 404, same
+		// as setItemDate's place-only restriction.
+		//
+		// LOCK ORDER (do not reorder — peer CODEX reproduced the deadlock):
+		// item row → stop rows → trips row, where the trips lock comes only
+		// from the 0010 activity triggers at UPDATE time. Every row lock is
+		// taken with trigger-free SELECT … FOR UPDATE *before* any UPDATE
+		// fires a trigger; ordinary stop writers (notes/reorder/remove) go
+		// stop → trips, so a visited writer that touched trips before locking
+		// the stops would cycle with them. FOR UPDATE OF restricts each lock
+		// to the named table — locking the joined trips row here would
+		// recreate the same cycle from the other side.
+		const auth = await client.query<{ trip_id: number }>(
+			`SELECT i.trip_id
+			   FROM itinerary_items i
+			   JOIN trips t ON t.id = i.trip_id
+			  WHERE i.id = $1 AND t.owner_id = $2 AND i.item_type = 'place'
+			  FOR UPDATE OF i`,
+			[itemId, ownerId]
+		);
+		if ((auth.rowCount ?? 0) === 0) return false;
+		// Fan-out is scoped through day_plans to the item's own trip: the
+		// schema's FKs alone do not force stop.plan.trip == item.trip, and the
+		// hard account partition must hold even against a malformed cross-trip
+		// link (0016 also enforces this for future writes).
+		const locked = await client.query<{ id: number }>(
+			`SELECT s.id
+			   FROM day_plan_stops s
+			   JOIN day_plans p ON p.id = s.day_plan_id
+			  WHERE s.itinerary_item_id = $1 AND p.trip_id = $2
+			  ORDER BY s.id
+			  FOR UPDATE OF s`,
+			[itemId, auth.rows[0].trip_id]
+		);
+		await client.query(`UPDATE itinerary_items SET visited = $2 WHERE id = $1`, [
+			itemId,
+			visited
+		]);
+		if (locked.rows.length > 0) {
+			await client.query(`UPDATE day_plan_stops SET visited = $2 WHERE id = ANY($1::int[])`, [
+				locked.rows.map((r) => r.id),
+				visited
+			]);
+		}
+		return true;
+	});
 }

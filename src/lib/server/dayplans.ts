@@ -268,6 +268,27 @@ export async function duplicateDayPlan(
 		const plan = source.rows[0];
 		if (!plan) return null;
 
+		// Lock every distinct linked itinerary item FIRST — before the plan
+		// INSERT. Two reasons, both load-bearing:
+		// 1. The stop-copy INSERT…SELECT below reads i.visited; without the
+		//    lock a concurrent visited toggle can commit between that read and
+		//    ours, leaving the new copies stale outside the toggle's fan-out.
+		// 2. Lock ORDER. The 0010 activity triggers make every day_plans /
+		//    itinerary_items write also lock the trips row, so the canonical
+		//    order is item → trips. Inserting the plan first (trips lock via
+		//    trigger) and locking items after deadlocks against setItemVisited,
+		//    which takes item → trips — the visited.dbtest race caught exactly
+		//    that.
+		await client.query(
+			`SELECT id FROM itinerary_items
+			  WHERE id IN (SELECT DISTINCT itinerary_item_id
+			                 FROM day_plan_stops
+			                WHERE day_plan_id = $1 AND itinerary_item_id IS NOT NULL)
+			  ORDER BY id
+			  FOR UPDATE`,
+			[planId]
+		);
+
 		// The four anchor columns move together or not at all: day_plans_anchor_complete
 		// (migration 0009) rejects a partially populated anchor.
 		const created = await client.query<{ id: number }>(
@@ -288,15 +309,21 @@ export async function duplicateDayPlan(
 		);
 		const newPlanId = created.rows[0].id;
 
+		// Linked copies are born agreeing with the canonical item (td-430ffe:
+		// the place is the single source of truth, so a duplicated plan must
+		// not show a false copy of a visited place; the items were locked
+		// above). Orphan stops have no canonical truth and deliberately reset
+		// to unvisited — duplicating a plan means doing that day again.
 		await client.query(
 			`INSERT INTO day_plan_stops
 			   (day_plan_id, itinerary_item_id, sort_order, notes, visited,
 			    snapshot_title, snapshot_lat, snapshot_lon, snapshot_place_id)
-			 SELECT $1, itinerary_item_id, sort_order, notes, FALSE,
-			        snapshot_title, snapshot_lat, snapshot_lon, snapshot_place_id
-			   FROM day_plan_stops
-			  WHERE day_plan_id = $2
-			  ORDER BY sort_order, id`,
+			 SELECT $1, s.itinerary_item_id, s.sort_order, s.notes, COALESCE(i.visited, FALSE),
+			        s.snapshot_title, s.snapshot_lat, s.snapshot_lon, s.snapshot_place_id
+			   FROM day_plan_stops s
+			   LEFT JOIN itinerary_items i ON i.id = s.itinerary_item_id
+			  WHERE s.day_plan_id = $2
+			  ORDER BY s.sort_order, s.id`,
 			[newPlanId, planId]
 		);
 
@@ -308,23 +335,53 @@ async function insertStop(
 	client: Pick<pg.PoolClient, 'query'>,
 	tripId: number,
 	planId: number,
-	sortOrder: number,
+	// null = compute MAX(sort_order)+1 AFTER the locks are held. Callers may
+	// only pass a number for a plan created in this same transaction (no
+	// concurrent sibling can exist yet); for any pre-existing plan a caller-
+	// computed sort races a concurrent add and duplicates sort_order.
+	sortOrder: number | null,
 	input: StopInput
 ): Promise<number | null> {
+	// item_type = 'place': only places may become linked stops. Sections, days
+	// and notes are not visitable, and a non-place-linked stop would let the
+	// viewer-whitelisted setStopVisited fan-out mutate a non-place item,
+	// bypassing setItemVisited's place-only authorization. (All existing prod
+	// stops are place-linked, verified 2026-08-02.)
+	// FOR UPDATE: the visited read must participate in the canonical
+	// item-first lock order — without it, a concurrent setItemVisited can
+	// commit between this read and the INSERT below, and the new copy is born
+	// stale with no error anywhere.
 	const item = await client.query<{
 		id: number;
 		title: string;
 		lat: number | null;
 		lon: number | null;
 		place_id: string | null;
+		visited: boolean;
 	}>(
-		`SELECT id, title, lat, lon, place_id
+		`SELECT id, title, lat, lon, place_id, visited
 		   FROM itinerary_items
-		  WHERE id = $1 AND trip_id = $2`,
+		  WHERE id = $1 AND trip_id = $2 AND item_type = 'place'
+		  FOR UPDATE`,
 		[input.itinerary_item_id, tripId]
 	);
 	if (item.rowCount === 0) return null;
 	const i = item.rows[0];
+	// Canonical order: the item lock above, then the plan row + ALL existing
+	// stop locks, before the INSERT below fires the trips trigger. Without
+	// this, addStop holds trips (INSERT trigger) and then clearDrivingForPlan
+	// seeks the other stops — the reproduced 40P01.
+	await lockPlanStops(client, planId);
+	const sort =
+		sortOrder ??
+		(
+			await client.query<{ next: number }>(
+				`SELECT COALESCE(MAX(sort_order) + 1, 0) AS next
+				   FROM day_plan_stops
+				  WHERE day_plan_id = $1`,
+				[planId]
+			)
+		).rows[0].next;
 	await assertLocationIsNewToPlan(client, planId, {
 		title: i.title,
 		itinerary_item_id: i.id,
@@ -332,13 +389,16 @@ async function insertStop(
 		lat: i.lat,
 		lon: i.lon
 	});
+	// New copies are born agreeing with the canonical item's visited flag —
+	// adding an already-visited place to a plan must not create a false copy
+	// (td-430ffe single-source-of-truth invariant).
 	const res = await client.query<{ id: number }>(
 		`INSERT INTO day_plan_stops
-		   (day_plan_id, itinerary_item_id, sort_order, notes,
+		   (day_plan_id, itinerary_item_id, sort_order, notes, visited,
 		    snapshot_title, snapshot_lat, snapshot_lon, snapshot_place_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		 RETURNING id`,
-		[planId, i.id, sortOrder, input.notes, i.title, i.lat, i.lon, i.place_id]
+		[planId, i.id, sort, input.notes, i.visited, i.title, i.lat, i.lon, i.place_id]
 	);
 	return res.rows[0].id;
 }
@@ -348,6 +408,23 @@ export async function createDayPlan(
 	input: DayPlanInput & { stops: StopInput[]; anchor?: AnchorInput | null }
 ): Promise<number> {
 	return withTransaction(async (client) => {
+		// Canonical lock order is item → trips (see duplicateDayPlan): the
+		// 0010 trigger on the day_plans INSERT below locks the trips row, and
+		// insertStop's FOR UPDATE locks items — so the items must be locked
+		// BEFORE the plan INSERT or this deadlocks against a concurrent
+		// visited toggle.
+		const itemIds = [...new Set(input.stops.map((s) => s.itinerary_item_id))].sort(
+			(x, y) => x - y
+		);
+		if (itemIds.length > 0) {
+			await client.query(
+				`SELECT id FROM itinerary_items
+				  WHERE id = ANY($1::int[]) AND trip_id = $2
+				  ORDER BY id
+				  FOR UPDATE`,
+				[itemIds, tripId]
+			);
+		}
 		const plan = await client.query<{ id: number }>(
 			`INSERT INTO day_plans
 			   (trip_id, title, notes, optional_date, anchor_source, anchor_title, anchor_lat, anchor_lon)
@@ -391,6 +468,7 @@ export async function setDayPlanAnchor(
 ): Promise<boolean> {
 	return withTransaction(async (client) => {
 		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
+		await lockPlanStops(client, planId);
 		await assertAnchorIsNewToPlan(client, planId, anchor);
 		await clearDrivingForPlan(client, planId);
 		const res = await client.query(
@@ -428,9 +506,48 @@ export async function updateDayPlan(
 	return (res.rowCount ?? 0) > 0;
 }
 
+/**
+ * Take the write locks for a plan-and-its-stops transaction, trigger-free and
+ * in canonical order: **item(s) → plan row → stop rows → trips**, where the
+ * trips lock is only ever acquired implicitly by the FIRST trigger-firing
+ * write afterwards (every day_plans/day_plan_stops write locks the trips row
+ * through the 0010 activity triggers).
+ *
+ * The plan-row lock is load-bearing twice over (peer CODEX, rounds 4–5, both
+ * reproduced as 40P01):
+ * - ORDER: updateDayPlan is a bare UPDATE day_plans, i.e. plan → trips.
+ *   A writer that touched stops first (holding trips via the stop trigger)
+ *   and only then updated the plan row cycled against it.
+ * - MEMBERSHIP: FOR UPDATE on the parent conflicts with the FK key-share an
+ *   INSERTing child must take, so while it is held no new stop can appear —
+ *   the stop enumeration below is phantom-proof, and MAX(sort_order) is
+ *   stable iff computed AFTER this call.
+ * Once prelocked, statements may run in any business order reentrantly.
+ */
+async function lockPlanStops(
+	client: Pick<pg.PoolClient, 'query'>,
+	planId: number
+): Promise<void> {
+	await client.query(`SELECT id FROM day_plans WHERE id = $1 FOR UPDATE`, [planId]);
+	await client.query(
+		`SELECT id FROM day_plan_stops WHERE day_plan_id = $1 ORDER BY id FOR UPDATE`,
+		[planId]
+	);
+}
+
 export async function deleteDayPlan(tripId: number, planId: number): Promise<boolean> {
-	const res = await query(`DELETE FROM day_plans WHERE id = $1 AND trip_id = $2`, [planId, tripId]);
-	return (res.rowCount ?? 0) > 0;
+	return withTransaction(async (client) => {
+		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
+		// The plan DELETE takes the trips lock (trigger) and then cascades into
+		// the stop rows — prelock the stops so the cascade never seeks a stop
+		// while holding trips.
+		await lockPlanStops(client, planId);
+		const res = await client.query(`DELETE FROM day_plans WHERE id = $1 AND trip_id = $2`, [
+			planId,
+			tripId
+		]);
+		return (res.rowCount ?? 0) > 0;
+	});
 }
 
 export async function addStop(
@@ -440,13 +557,10 @@ export async function addStop(
 ): Promise<number | null> {
 	return withTransaction(async (client) => {
 		if (!(await assertPlanInTrip(client, tripId, planId))) return null;
-		const sort = await client.query<{ next: number }>(
-			`SELECT COALESCE(MAX(sort_order) + 1, 0) AS next
-			   FROM day_plan_stops
-			  WHERE day_plan_id = $1`,
-			[planId]
-		);
-		const id = await insertStop(client, tripId, planId, sort.rows[0].next, input);
+		// sort order is computed inside insertStop AFTER the plan-row barrier —
+		// computing it here raced a concurrent add into duplicate sort_order
+		// (peer CODEX, round 5).
+		const id = await insertStop(client, tripId, planId, null, input);
 		if (id !== null) {
 			await clearDrivingForPlan(client, planId);
 			await client.query(`UPDATE day_plans SET updated_at = NOW() WHERE id = $1`, [planId]);
@@ -466,6 +580,7 @@ export async function removeStop(tripId: number, stopId: number): Promise<boolea
 		);
 		if (stop.rowCount === 0) return false;
 		const planId = stop.rows[0].day_plan_id;
+		await lockPlanStops(client, planId);
 		await client.query(`DELETE FROM day_plan_stops WHERE id = $1`, [stopId]);
 		await reindexStops(client, planId);
 		await clearDrivingForPlan(client, planId);
@@ -519,6 +634,9 @@ export async function reorderStops(
 ): Promise<boolean> {
 	return withTransaction(async (client) => {
 		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
+		// Prelock in id order — two reorders with opposite requested orders
+		// would otherwise take the per-stop UPDATE locks in opposite orders.
+		await lockPlanStops(client, planId);
 		const existing = await client.query<{ id: number }>(
 			`SELECT id FROM day_plan_stops WHERE day_plan_id = $1 ORDER BY sort_order, id`,
 			[planId]
@@ -565,6 +683,7 @@ export async function bulkUpdateAiNotes(
 ): Promise<boolean> {
 	return withTransaction(async (client) => {
 		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
+		await lockPlanStops(client, planId);
 		const stopRes = await client.query<{ id: number }>(
 			`SELECT id FROM day_plan_stops WHERE day_plan_id = $1`,
 			[planId]
@@ -588,15 +707,91 @@ export async function setStopVisited(
 	stopId: number,
 	visited: boolean
 ): Promise<boolean> {
-	const res = await query(
-		`UPDATE day_plan_stops s
-		    SET visited = $3
-		   FROM day_plans p
-		   JOIN trips t ON t.id = p.trip_id
-		  WHERE s.id = $1 AND s.day_plan_id = p.id AND t.owner_id = $2`,
-		[stopId, ownerId, visited]
-	);
-	return (res.rowCount ?? 0) > 0;
+	return withTransaction(async (client) => {
+		// Authorize and resolve the link with a plain SELECT — deliberately no
+		// row write yet, so BOTH propagation entry points take their locks in
+		// one canonical order: itinerary item first, then stop copies.
+		// (setItemVisited is item→stops; writing the clicked stop first here
+		// would be stop→item→stops, and the two orders deadlock under
+		// ordinary simultaneous check-offs.)
+		const res = await client.query<{ itinerary_item_id: number | null }>(
+			`SELECT s.itinerary_item_id
+			   FROM day_plan_stops s
+			   JOIN day_plans p ON p.id = s.day_plan_id
+			   JOIN trips t ON t.id = p.trip_id
+			  WHERE s.id = $1 AND t.owner_id = $2`,
+			[stopId, ownerId]
+		);
+		if ((res.rowCount ?? 0) === 0) return false;
+		const itemId = res.rows[0].itinerary_item_id;
+
+		// Orphan stops (place deleted after the plan was built) keep their own
+		// independent flag.
+		if (itemId === null) {
+			await client.query(`UPDATE day_plan_stops SET visited = $2 WHERE id = $1`, [
+				stopId,
+				visited
+			]);
+			return true;
+		}
+
+		// The place is the single source of truth (td-430ffe): a linked stop's
+		// flag fans out to the item and EVERY stop copy of it (including the
+		// clicked one) — a place can sit in several plans, and updating only
+		// the clicked copy is exactly the disagreement the design prevents.
+		// The authorization independently re-asserts owner AND item_type =
+		// 'place' rather than trusting the stop's link: this path is viewer-
+		// whitelisted, and without the predicate a stop linked to a non-place
+		// item would let a viewer flip that item's flag, bypassing
+		// setItemVisited's place-only authorization.
+		//
+		// LOCK ORDER (do not reorder — peer CODEX reproduced the deadlock):
+		// item row → stop rows → trips row; all row locks via trigger-free
+		// SELECT … FOR UPDATE before any UPDATE fires a 0010 trigger. See
+		// setItemVisited for the full reasoning; both writers must match.
+		const item = await client.query<{ trip_id: number }>(
+			`SELECT i.trip_id
+			   FROM itinerary_items i
+			   JOIN trips t ON t.id = i.trip_id
+			  WHERE i.id = $1 AND t.owner_id = $2 AND i.item_type = 'place'
+			  FOR UPDATE OF i`,
+			[itemId, ownerId]
+		);
+		if ((item.rowCount ?? 0) === 0) {
+			// The linked row is not an updatable place — deleted since the
+			// SELECT (FK nulls the link), or a legacy non-place link. Either
+			// way the stop's flag is independent data; honor the click on the
+			// stop alone and leave the item untouched.
+			await client.query(`UPDATE day_plan_stops SET visited = $2 WHERE id = $1`, [
+				stopId,
+				visited
+			]);
+			return true;
+		}
+		// Fan-out scoped through day_plans to the item's own trip (the FKs
+		// alone don't force stop.plan.trip == item.trip, and the account
+		// partition must hold even against a malformed link). The clicked
+		// stop is included explicitly: it was authorized above, and if its
+		// link IS malformed it still must honor the click.
+		const locked = await client.query<{ id: number }>(
+			`SELECT s.id
+			   FROM day_plan_stops s
+			   JOIN day_plans p ON p.id = s.day_plan_id
+			  WHERE (s.itinerary_item_id = $1 AND p.trip_id = $2) OR s.id = $3
+			  ORDER BY s.id
+			  FOR UPDATE OF s`,
+			[itemId, item.rows[0].trip_id, stopId]
+		);
+		await client.query(`UPDATE itinerary_items SET visited = $2 WHERE id = $1`, [
+			itemId,
+			visited
+		]);
+		await client.query(`UPDATE day_plan_stops SET visited = $2 WHERE id = ANY($1::int[])`, [
+			locked.rows.map((r) => r.id),
+			visited
+		]);
+		return true;
+	});
 }
 
 /**
@@ -649,6 +844,7 @@ export async function bulkUpdateDriving(
 ): Promise<boolean> {
 	return withTransaction(async (client) => {
 		if (!(await assertPlanInTrip(client, tripId, planId))) return false;
+		await lockPlanStops(client, planId);
 		const stopRes = await client.query<{ id: number }>(
 			`SELECT id FROM day_plan_stops WHERE day_plan_id = $1 ORDER BY sort_order, id`,
 			[planId]
@@ -694,6 +890,7 @@ export async function optimizeStopOrder(
 ): Promise<number[] | null> {
 	return withTransaction(async (client) => {
 		if (!(await assertPlanInTrip(client, tripId, planId))) return null;
+		await lockPlanStops(client, planId);
 		const res = await client.query<{
 			id: number;
 			snapshot_lat: number | null;

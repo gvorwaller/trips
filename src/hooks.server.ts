@@ -21,13 +21,16 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
  * Narrow writes a read-only viewer is permitted: toggling a packing item's
- * checked state, and marking a day-plan stop visited. Everything else is 403
- * for viewers. Each endpoint verifies that only the allowed boolean changes.
+ * checked state, marking a day-plan stop visited, and marking a place visited
+ * from the Places tree. Everything else is 403 for viewers. Each endpoint
+ * verifies that only the allowed boolean changes.
  */
 function isViewerAllowedMutation(method: string, path: string): boolean {
 	return (
 		method === 'PATCH' &&
-		(path === '/api/packing/check' || path === '/api/dayplan/visited')
+		(path === '/api/packing/check' ||
+			path === '/api/dayplan/visited' ||
+			path === '/api/itinerary/visited')
 	);
 }
 

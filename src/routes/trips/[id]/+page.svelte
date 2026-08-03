@@ -1140,13 +1140,50 @@
 		builderRouteMin = null;
 	}
 
-	async function toggleVisited(id: number, visited: boolean) {
-		const res = await fetch('/api/dayplan/visited', {
-			method: 'PATCH',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ id, visited })
-		});
-		if (res.ok) await invalidateAll();
+	// A native checkbox flips its own DOM state before the request is even
+	// sent, so a failed PATCH left the control lying about what was saved
+	// (peer CODEX, td-430ffe review). On any failure: revert the control to
+	// the server's truth and say so. The pending set drops re-clicks while a
+	// request is in flight, so out-of-order completions can't interleave.
+	const visitedPending = new Set<string>();
+	let visitedSaveError = $state<string | null>(null);
+	async function sendVisited(
+		kind: 'stop' | 'item',
+		id: number,
+		visited: boolean,
+		input: HTMLInputElement
+	) {
+		const key = `${kind}:${id}`;
+		if (visitedPending.has(key)) {
+			input.checked = !visited;
+			return;
+		}
+		visitedPending.add(key);
+		visitedSaveError = null;
+		try {
+			const res = await fetch(kind === 'stop' ? '/api/dayplan/visited' : '/api/itinerary/visited', {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id, visited })
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await invalidateAll();
+		} catch {
+			input.checked = !visited;
+			visitedSaveError = 'Could not save that visited change — it has been undone. Try again.';
+		} finally {
+			visitedPending.delete(key);
+		}
+	}
+
+	function toggleVisited(id: number, visited: boolean, input: HTMLInputElement) {
+		return sendVisited('stop', id, visited, input);
+	}
+
+	// Check a place off from the Places tree (td-430ffe). The server fans the
+	// flag out to every day-plan stop copy, so both surfaces always agree.
+	function toggleItemVisited(id: number, visited: boolean, input: HTMLInputElement) {
+		return sendVisited('item', id, visited, input);
 	}
 
 	async function reorderSavedStop(planId: number, stopId: number, delta: number) {
@@ -1384,6 +1421,19 @@
 				.filter(({ node }) => placesVisibleIds.has(node.id))
 				.map((row) => ({ ...row, folded: false }));
 		return data.itineraryRows.map((row) => ({ ...row, folded: itinHidden.has(row.node.id) }));
+	});
+
+	// The reason the Places check-off exists: a visited roll-up for the header.
+	const placeVisitStats = $derived.by(() => {
+		let total = 0;
+		let visited = 0;
+		for (const { node } of data.itineraryRows) {
+			if (node.item_type === 'place') {
+				total++;
+				if (node.visited) visited++;
+			}
+		}
+		return { total, visited };
 	});
 
 	function toggled(set: Set<number>, key: string, id: number): Set<number> {
@@ -1675,6 +1725,9 @@
 		{#if data.dayPlans.length === 0}
 			<p class="muted">No day plans yet.</p>
 		{:else}
+			{#if visitedSaveError}
+				<p class="field-error" role="alert">{visitedSaveError}</p>
+			{/if}
 			<div class="dayplan-list">
 				{#each data.dayPlans as plan (plan.id)}
 					{@const stops = stopsForPlan(plan.id)}
@@ -1902,7 +1955,8 @@
 														<input
 															type="checkbox"
 															checked={stop.visited}
-															onchange={(e) => toggleVisited(stop.id, e.currentTarget.checked)}
+															onchange={(e) =>
+															toggleVisited(stop.id, e.currentTarget.checked, e.currentTarget)}
 														/>
 														<span class:done={stop.visited}>{stop.snapshot_title}</span>
 													</label>
@@ -2388,6 +2442,9 @@
 		<button class="section-toggle" type="button" onclick={() => toggleSection('places')}>
 			<span class="section-caret">{sectionCollapsed('places') ? '▸' : '▾'}</span>
 			<h2>Places</h2>
+			{#if placeVisitStats.total > 0}
+				<span class="count-badge">{placeVisitStats.visited} / {placeVisitStats.total} visited</span>
+			{/if}
 		</button>
 		<a class="btn small places-schedule-btn" href="/trips/{data.trip.id}/places/schedule">
 			📅 Schedule
@@ -2395,6 +2452,9 @@
 	</div>
 
 	<div class="fold" class:folded={sectionCollapsed('places')}>
+		{#if visitedSaveError}
+			<p class="field-error" role="alert">{visitedSaveError}</p>
+		{/if}
 		{#if data.itineraryRows.length > 0}
 			<PinMap {pins} onselect={selectPin} />
 		{/if}
@@ -2468,12 +2528,26 @@
 								{:else}
 									<span class="caret-spacer" aria-hidden="true"></span>
 								{/if}
+								{#if node.item_type === 'place'}
+									<label class="chk-hit">
+										<input
+											type="checkbox"
+											class="chk"
+											checked={node.visited}
+											aria-label="visited"
+											onchange={(e) =>
+												toggleItemVisited(node.id, e.currentTarget.checked, e.currentTarget)}
+										/>
+									</label>
+								{/if}
 								<span class="badge {node.item_type === 'place' ? 'seen' : 'need'}"
 									>{node.item_type}</span
 								>
 								<span class="grow">
 									<span class="place-title-line">
-										<span class="ttl">{node.title}</span>
+										<span class="ttl" class:done={node.item_type === 'place' && node.visited}
+											>{node.title}</span
+										>
 										{#if node.item_type === 'place' && node.date}
 											<time class="place-date" datetime={node.date}>
 												📅 {fmtPlaceDate(node.date)}
@@ -4572,6 +4646,25 @@
 		/* Grid items default to min-width: auto — without this the card still
 		   refuses to shrink below its content. */
 		min-width: 0;
+	}
+	/* The visited checkbox keeps its 22px glyph but the interactive target is
+	   the wrapping label at ≥44×44 (cs.md tap-target rule — this is a NEW
+	   control, so it meets the bar now rather than waiting for the
+	   td-3b3f5e sweep). The negative margins keep the dense row's visual
+	   rhythm: the extra hit area hangs over the row padding vertically and
+	   the NON-interactive type badge to the right — never over the caret
+	   button on the left. z-index puts the overlap above the badge so the
+	   whole 44px square actually receives the tap. */
+	.chk-hit {
+		position: relative;
+		z-index: 1;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 44px;
+		min-height: 44px;
+		margin: -11px -22px -11px 0;
+		cursor: pointer;
 	}
 	/* Folded content stays in the DOM so `@media print` can reveal it — print
 	   correctness must never depend on JS running at print time (Safari fires

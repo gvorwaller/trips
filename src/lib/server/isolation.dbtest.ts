@@ -17,6 +17,7 @@ import { duplicateTrip } from '$server/clone';
 import { getAttachmentForDownload, getAttachmentSource } from '$server/attachments';
 import { setPackingItemChecked } from '$server/packing';
 import { setStopVisited } from '$server/dayplans';
+import { setItemVisited } from '$server/itinerary';
 import { actions as settingsActions } from '../../routes/settings/+page.server';
 import { actions as placeActions } from '../../routes/trips/[id]/place/[itemId]/+page.server';
 import { GET as dayPlanExport } from '../../routes/trips/[id]/dayplan/[planId]/export/+server';
@@ -37,6 +38,7 @@ let b = 0; // user B id
 let v = 0; // viewer V id (views A)
 let tripA = 0;
 let tripB = 0;
+let itemA = 0;
 let packItemA = 0;
 let stopA = 0;
 let planA = 0;
@@ -78,7 +80,7 @@ beforeAll(async () => {
 		)
 	).rows[0].id;
 
-	const itemA = (
+	itemA = (
 		await query<{ id: number }>(
 			`INSERT INTO itinerary_items (trip_id, item_type, title, lat, lon)
 			 VALUES ($1, 'place', $2, 44.39, -68.20) RETURNING id`,
@@ -252,6 +254,18 @@ describe('viewer-exception mutations stay owner-scoped', () => {
 		expect(await setStopVisited(b, stopA, true)).toBe(false);
 		expect(await setStopVisited(a, stopA, true)).toBe(true);
 		expect(await setStopVisited(a, stopA, false)).toBe(true);
+	});
+
+	it('setItemVisited: B misses (and nothing changed), A hits', async () => {
+		expect(await setItemVisited(b, itemA, true)).toBe(false);
+		const still = await query<{ visited: boolean }>(
+			`SELECT visited FROM itinerary_items WHERE id = $1`,
+			[itemA]
+		);
+		expect(still.rows[0].visited).toBe(false);
+
+		expect(await setItemVisited(a, itemA, true)).toBe(true);
+		expect(await setItemVisited(a, itemA, false)).toBe(true);
 	});
 });
 

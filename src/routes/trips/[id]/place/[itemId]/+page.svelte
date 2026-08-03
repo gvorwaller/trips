@@ -5,8 +5,39 @@
 	import { MAX_QUESTION_LENGTH } from '$lib/place-ai-shared';
 	import { PLACE_DETAILS_STATUS_MESSAGE } from '$lib/place-details-status';
 	import type { PageData, ActionData } from './$types';
+	import { invalidateAll } from '$app/navigation';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
+
+	// Same viewer-permitted endpoint as the Places tree checkbox; the server
+	// fans the flag out to every day-plan stop copy of this place. A native
+	// checkbox flips its DOM state before the request is sent, so a failed
+	// PATCH must revert the control and say so — otherwise the page shows a
+	// saved state that isn't (peer CODEX, td-430ffe review).
+	let visitedSaving = false;
+	let visitedError = $state<string | null>(null);
+	async function toggleVisited(visited: boolean, input: HTMLInputElement) {
+		if (visitedSaving) {
+			input.checked = !visited;
+			return;
+		}
+		visitedSaving = true;
+		visitedError = null;
+		try {
+			const res = await fetch('/api/itinerary/visited', {
+				method: 'PATCH',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ id: data.item.id, visited })
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			await invalidateAll();
+		} catch {
+			input.checked = !visited;
+			visitedError = 'Could not save the visited change — it has been undone. Try again.';
+		} finally {
+			visitedSaving = false;
+		}
+	}
 
 	// Starts null; the saved coords (if any) are the fallback in the hidden inputs.
 	let picked = $state<PickedLocation | null>(null);
@@ -30,6 +61,17 @@
 	<a class="muted back" href="/trips/{data.trip.id}">← {data.trip.name}</a>
 	<h1>Place: {data.item.title}</h1>
 	<div class="sub">Search or tap the map to set this place’s coordinates.</div>
+	<label class="visited-toggle">
+		<input
+			type="checkbox"
+			checked={data.item.visited}
+			onchange={(e) => toggleVisited(e.currentTarget.checked, e.currentTarget)}
+		/>
+		<span class:done={data.item.visited}>Visited</span>
+	</label>
+	{#if visitedError}
+		<p class="visited-error" role="alert">{visitedError}</p>
+	{/if}
 </div>
 
 <div class="card">
@@ -267,5 +309,27 @@
 	}
 	.ai-summary p:first-child {
 		font-style: italic;
+	}
+	.visited-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 4px;
+		/* Standalone control, not inside a dense list row → 48px tap target. */
+		min-height: 48px;
+		cursor: pointer;
+	}
+	.visited-toggle input {
+		width: 20px;
+		height: 20px;
+	}
+	.done {
+		text-decoration: line-through;
+		color: var(--muted);
+	}
+	.visited-error {
+		color: var(--danger);
+		font-size: 0.9rem;
+		margin: 4px 0 0;
 	}
 </style>
