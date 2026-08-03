@@ -197,11 +197,44 @@ export async function setItemDates(
 }
 
 export async function deleteItem(tripId: number, id: number): Promise<boolean> {
-	const res = await query(`DELETE FROM itinerary_items WHERE id = $1 AND trip_id = $2`, [
-		id,
-		tripId
-	]);
-	return (res.rowCount ?? 0) > 0;
+	return withTransaction(async (client) => {
+		// Canonical lock order (td-36b55b; see lockPlanStops in dayplans.ts):
+		// item(s) → stop rows → trips, all via trigger-free SELECT … FOR
+		// UPDATE. A bare DELETE acquired the trips row first (0010 trigger)
+		// and only then swept the linked day-plan stops through the FK's
+		// ON DELETE SET NULL — a trips → stops edge that deadlocks against
+		// visited writers holding stops while seeking trips. So: lock the
+		// whole subtree's items (children cascade too), then every linked
+		// stop, and only then delete.
+		const subtree = await client.query<{ id: number }>(
+			`SELECT id FROM itinerary_items
+			  WHERE id IN (
+					WITH RECURSIVE sub AS (
+						SELECT id FROM itinerary_items WHERE id = $1 AND trip_id = $2
+						UNION ALL
+						SELECT i.id FROM itinerary_items i JOIN sub s ON i.parent_id = s.id
+					)
+					SELECT id FROM sub
+				)
+			  ORDER BY id
+			  FOR UPDATE`,
+			[id, tripId]
+		);
+		if (subtree.rows.length === 0) return false;
+		const itemIds = subtree.rows.map((r) => r.id);
+		await client.query(
+			`SELECT id FROM day_plan_stops
+			  WHERE itinerary_item_id = ANY($1::int[])
+			  ORDER BY id
+			  FOR UPDATE`,
+			[itemIds]
+		);
+		const res = await client.query(
+			`DELETE FROM itinerary_items WHERE id = $1 AND trip_id = $2`,
+			[id, tripId]
+		);
+		return (res.rowCount ?? 0) > 0;
+	});
 }
 
 /** Set an item's coordinates (from the MapPicker). google_maps_url is optional. */

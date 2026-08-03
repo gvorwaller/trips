@@ -8,7 +8,7 @@
 // designed).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { closePool, query, withTransaction } from '$lib/db';
-import { setItemVisited } from '$server/itinerary';
+import { deleteItem, setItemVisited } from '$server/itinerary';
 import {
 	addStop,
 	duplicateDayPlan,
@@ -640,6 +640,88 @@ describe('the plan-row barrier defeats stop-insert phantoms (round 5)', () => {
 
 		await query(`DELETE FROM day_plans WHERE id = $1`, [p]);
 		await query(`DELETE FROM itinerary_items WHERE id = ANY($1::int[])`, [[i1, i2, i3]]);
+	});
+});
+
+describe('cascade deletes follow the canonical lock order (td-36b55b)', () => {
+	it('deleteItem parked behind a held stop lock resolves without deadlock', async () => {
+		// Pre-fix, the bare DELETE took the trips row (0010 trigger) and THEN
+		// swept linked stops via the FK's ON DELETE SET NULL — so it held
+		// trips while seeking a stop an ordinary stop writer held, and that
+		// writer wanted trips: 40P01. The subtree-items + linked-stops prelock
+		// parks the delete before it ever touches trips.
+		const parent = (
+			await query<{ id: number }>(
+				`INSERT INTO itinerary_items (trip_id, item_type, title)
+				 VALUES ($1, 'section', 'Doomed section') RETURNING id`,
+				[tripId]
+			)
+		).rows[0].id;
+		const child = (
+			await query<{ id: number }>(
+				`INSERT INTO itinerary_items (trip_id, parent_id, item_type, title, lat, lon)
+				 VALUES ($1, $2, 'place', 'Doomed place', 45.5, -69.5) RETURNING id`,
+				[tripId, parent]
+			)
+		).rows[0].id;
+		const doomedStop = (
+			await query<{ id: number }>(
+				`INSERT INTO day_plan_stops (day_plan_id, itinerary_item_id, snapshot_title)
+				 VALUES ($1, $2, 'Doomed place') RETURNING id`,
+				[plan1, child]
+			)
+		).rows[0].id;
+
+		let release!: () => void;
+		const released = new Promise<void>((r) => (release = r));
+		let lockTaken!: () => void;
+		const lockTakenP = new Promise<void>((r) => (lockTaken = r));
+		const writerB = withTransaction(async (client) => {
+			await client.query(`SELECT id FROM day_plan_stops WHERE id = $1 FOR UPDATE`, [
+				doomedStop
+			]);
+			lockTaken();
+			await released;
+			// The ordinary stop writer's second half: takes trips via trigger.
+			await client.query(`UPDATE day_plan_stops SET notes = 'cascade race' WHERE id = $1`, [
+				doomedStop
+			]);
+		});
+		await lockTakenP;
+		const writerA = deleteItem(tripId, parent);
+		await new Promise((r) => setTimeout(r, 200));
+		release();
+		await writerB;
+		expect(await writerA).toBe(true);
+
+		// The subtree is gone and the linked stop became a true orphan.
+		const remaining = await query<{ n: string }>(
+			`SELECT count(*) n FROM itinerary_items WHERE id = ANY($1::int[])`,
+			[[parent, child]]
+		);
+		expect(Number(remaining.rows[0].n)).toBe(0);
+		const orphaned = await query<{ itinerary_item_id: number | null }>(
+			`SELECT itinerary_item_id FROM day_plan_stops WHERE id = $1`,
+			[doomedStop]
+		);
+		expect(orphaned.rows[0].itinerary_item_id).toBeNull();
+		await query(`DELETE FROM day_plan_stops WHERE id = $1`, [doomedStop]);
+	});
+
+	it('deleteItem still refuses cross-trip ids and reports false', async () => {
+		const otherTrip = (
+			await query<{ id: number }>(
+				`INSERT INTO trips (owner_id, name) VALUES ($1, 'Other') RETURNING id`,
+				[userId]
+			)
+		).rows[0].id;
+		expect(await deleteItem(otherTrip, place)).toBe(false);
+		const still = await query<{ n: string }>(
+			`SELECT count(*) n FROM itinerary_items WHERE id = $1`,
+			[place]
+		);
+		expect(Number(still.rows[0].n)).toBe(1);
+		await query(`DELETE FROM trips WHERE id = $1`, [otherTrip]);
 	});
 });
 

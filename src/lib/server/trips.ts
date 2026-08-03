@@ -72,6 +72,16 @@ export async function updateTrip(
 	return (res.rowCount ?? 0) > 0;
 }
 
+/**
+ * DELIBERATE lock-order exception (td-36b55b): deleting a trip locks the
+ * trips row FIRST and then cascades into every child table — the reverse of
+ * the canonical item(s) → plan → stops → trips order every other writer
+ * follows. A full prelock would have to enumerate every cascade target
+ * (items, plans, stops, packing lists/items, reservations, attachments,
+ * expenses, …) in canonical order and keep that list in lockstep with the
+ * schema forever. Accepted instead: a concurrent writer racing a whole-trip
+ * delete may get a retryable 40P01, and the trip is gone either way.
+ */
 export async function deleteTrip(ownerId: number, tripId: number): Promise<boolean> {
 	const res = await query(`DELETE FROM trips WHERE id = $1 AND owner_id = $2`, [tripId, ownerId]);
 	return (res.rowCount ?? 0) > 0;
