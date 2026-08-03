@@ -85,12 +85,14 @@ export async function createItem(tripId: number, item: NewItem): Promise<number>
 	});
 }
 
-/** Create many items as siblings under one parent (multi-line paste). Returns count. */
+/** Create many items as siblings under one parent (multi-line paste). Returns
+ * count. An optional date applies to every created row (td-2092b7). */
 export async function bulkCreate(
 	tripId: number,
 	parentId: number | null,
 	itemType: ItemType,
-	titles: string[]
+	titles: string[],
+	date: string | null = null
 ): Promise<number> {
 	const clean = titles.map((t) => t.trim()).filter((t) => t.length > 0);
 	if (clean.length === 0) return 0;
@@ -99,9 +101,9 @@ export async function bulkCreate(
 		let sort = await nextSortOrder(client, 'itinerary_items', tripId, parentId);
 		for (const title of clean) {
 			await client.query(
-				`INSERT INTO itinerary_items (trip_id, parent_id, sort_order, item_type, title)
-				 VALUES ($1, $2, $3, $4, $5)`,
-				[tripId, parentId, sort++, itemType, title.slice(0, 500)]
+				`INSERT INTO itinerary_items (trip_id, parent_id, sort_order, item_type, title, date)
+				 VALUES ($1, $2, $3, $4, $5, $6)`,
+				[tripId, parentId, sort++, itemType, title.slice(0, 500), date]
 			);
 		}
 		return clean.length;

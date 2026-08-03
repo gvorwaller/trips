@@ -17,6 +17,7 @@
 		type MapPlace
 	} from '$lib/maplinks';
 	import { haversineKm, formatDistance, formatDuration, type DistanceUnit } from '$lib/geo';
+	import { MAX_IMPORT_ITEMS } from '$lib/import-limits';
 	import {
 		computeLegDistances,
 		optimizeDrivingRoute,
@@ -277,7 +278,212 @@
 	let itinBirdsFetching = $state(false);
 	let itinBirdsMsg = $state('');
 	let itinBirdsUsername = $state('');
-	let itinBirdsTripId = $state('');
+	// Discovery fetch keeps the FULL payload here; the visible candidate list
+	// is rebuilt from it per trip filter. Filtering only the display would
+	// silently import hidden rows: selectedItin() walks the whole
+	// itinCandidates array and withItinSelection pre-selects everything
+	// non-duplicate.
+	interface BirdsTripOption {
+		id: number;
+		name: string;
+		start_date: string | null;
+		end_date: string | null;
+		placeCount: number;
+	}
+	let itinBirdsRaw = $state<ItinCandidateRaw[]>([]);
+	let itinBirdsTrips = $state<BirdsTripOption[]>([]);
+	let itinBirdsTruncated = $state(false);
+	let itinBirdsSelectedTrip = $state('');
+	// The scoped trip id travels through the hidden input's DOM .value,
+	// written IMPERATIVELY right before requestSubmit — never through a
+	// reactive attribute: Svelte batches DOM updates, so a reactive value set
+	// in the same tick would still be absent from the synchronously-captured
+	// FormData (peer CODEX, round 2). Response handling reads the id from the
+	// submitted formData only.
+	let birdsTripInputEl = $state<HTMLInputElement | null>(null);
+	let birdsFormEl = $state<HTMLFormElement | null>(null);
+	// Ownership token for the SHARED candidate review panel: every producer
+	// (text / URL / photo / birds, and sync writers like the trip filter,
+	// Clear, or a completed import) claims it before writing, and every async
+	// completion writes only while still the owner — a slow response from one
+	// source must not overwrite a newer source's panel (peer CODEX, round 2).
+	let candPanelGen = 0;
+	function claimCandidatePanel(): number {
+		return ++candPanelGen;
+	}
+	// Which producer's data the panel currently holds — 'birds' panels are
+	// wiped on a Birds-username change, others are left alone (round 5).
+	let candPanelSource: 'birds' | 'other' | null = null;
+	// Async producers must claim AND clear atomically at submit: claiming
+	// alone leaves the previous source's rows visible and importable during
+	// the in-flight window — the same wrong-context defect in a different
+	// producer (peer CODEX, round 3).
+	function claimAndClearCandidatePanel(source: 'birds' | 'other' | null = 'other'): number {
+		const gen = claimCandidatePanel();
+		itinCandidates = [];
+		candPanelSource = source;
+		return gen;
+	}
+	// Monotonic request generation: only the newest request's completion may
+	// touch shared state; stale completions are dropped entirely.
+	let birdsReqSeq = 0;
+	// tripId -> count corrected by a complete scoped refetch; -1 means the
+	// scoped fetch itself was truncated (a >5000-place trip).
+	let birdsExactCounts = $state<Record<string, number>>({});
+	// Manual escape hatch: a truncated discovery can omit ENTIRE trips, so the
+	// dropdown alone cannot reach them (its list is derived from the same
+	// incomplete payload).
+	let birdsManualTripId = $state('');
+	// The (trimmed) username the current Birds payload/cache belongs to —
+	// captured at discovery submit. Editing the username field wipes all
+	// Birds-derived state: a scoped cache hit must never serve user A's
+	// payload under user B's context (peer CODEX, round 4).
+	let birdsStateUsername = '';
+	// Complete scoped payloads, keyed by username + trip id (composite key as
+	// defense in depth on top of the wipe-on-username-edit): a scoped fetch
+	// that lost panel ownership mid-flight must stay loadable later without a
+	// refetch (peer CODEX, round 3).
+	let birdsScopedCache = $state<Record<string, ItinCandidateRaw[]>>({});
+	// The trip whose content the panel actually SHOWS ('' = all/none). The
+	// native select's bind commits a new choice before onchange even fires,
+	// so a scoped request that fails or loses panel ownership must revert the
+	// dropdown to this value — otherwise the instructed recovery ("select it
+	// in the dropdown") is a no-op, because re-selecting the already-selected
+	// option fires no change event (peer CODEX, browser QA).
+	let birdsCommittedTrip = $state('');
+	function birdsCacheKey(tripId: string): string {
+		return JSON.stringify([birdsStateUsername, tripId]);
+	}
+
+	function resetBirdsFetchState() {
+		// Advancing the generation CANCELS any in-flight Birds request: its
+		// completion sees a stale reqId and drops itself, so a wiped context
+		// can never be repopulated by a late response — whether the wipe came
+		// from a username edit or from import-success cache hygiene
+		// (peer CODEX, round 5). Callers that start a NEW request must take
+		// their reqId AFTER calling this.
+		birdsReqSeq++;
+		itinBirdsFetching = false;
+		itinBirdsRaw = [];
+		itinBirdsTrips = [];
+		itinBirdsTruncated = false;
+		itinBirdsSelectedTrip = '';
+		birdsCommittedTrip = '';
+		birdsExactCounts = {};
+		birdsScopedCache = {};
+	}
+
+	function onBirdsUsernameInput() {
+		if (itinBirdsUsername.trim() === birdsStateUsername) return;
+		// Everything Birds-derived belongs to the previous username. That
+		// includes the candidate PANEL when Birds produced it — leaving A's
+		// rows importable under B's username is the same wrong-context
+		// surface, just via the live panel instead of the cache (peer CODEX,
+		// round 5). Panels from other sources are none of Birds' business.
+		if (candPanelSource === 'birds') {
+			claimAndClearCandidatePanel(null);
+			itinBirdsMsg = 'Birds results cleared — fetch again for the new username.';
+		}
+		resetBirdsFetchState();
+	}
+
+	function birdsCountLabel(t: BirdsTripOption): string {
+		const exact = birdsExactCounts[String(t.id)];
+		if (exact === -1) return '5000+';
+		if (exact !== undefined) return String(exact);
+		// Discovery counts under truncation are only lower bounds.
+		return `${t.placeCount}${itinBirdsTruncated ? '+' : ''}`;
+	}
+
+	function birdsSummaryMsg(raw: ItinCandidateRaw[]): string {
+		const dupes = raw.filter((c) => c.duplicate).length;
+		return `${raw.length} Birds place${raw.length === 1 ? '' : 's'} found${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+	}
+
+	// Rebuilds itinCandidates from the raw payload for the selected trip.
+	// Deliberately DISCARDS per-row edits/selections made before switching
+	// trips — acceptable for an import flow, and stated rather than emergent.
+	function applyBirdsTripFilter() {
+		claimCandidatePanel();
+		candPanelSource = 'birds';
+		if (itinBirdsTruncated && !itinBirdsSelectedTrip) {
+			// A truncated discovery payload can omit whole trips AND cut one
+			// trip mid-list — an "All trips" import would be silently partial
+			// with no way to detect it. Scoped per-trip refetches are complete.
+			itinCandidates = [];
+			itinBirdsMsg =
+				'Birds has more places than one fetch can carry — pick a trip below to import it completely.';
+			// This empty blocked-All view IS the committed display: a later
+			// scoped rollback must land on All, not a stale earlier trip.
+			birdsCommittedTrip = '';
+			return;
+		}
+		const filtered = itinBirdsSelectedTrip
+			? itinBirdsRaw.filter(
+					(c) =>
+						Number((c.meta as Record<string, unknown> | null | undefined)?.birds_trip_id) ===
+						Number(itinBirdsSelectedTrip)
+				)
+			: itinBirdsRaw;
+		itinCandidates = withItinSelection(filtered);
+		itinBirdsMsg =
+			filtered.length === 0 ? 'No importable Birds places found.' : birdsSummaryMsg(filtered);
+		birdsCommittedTrip = itinBirdsSelectedTrip;
+	}
+
+	function fetchBirdsTripScoped(tripId: string) {
+		if (!birdsTripInputEl || !birdsFormEl) return;
+		// The previous trip's rows must not remain importable while the new
+		// one loads — clear the panel BEFORE the request starts.
+		claimAndClearCandidatePanel('birds');
+		itinBirdsMsg = 'Fetching trip from Birds…';
+		// Direct DOM write: deterministic for the synchronous submit below,
+		// with no dependence on Svelte's render scheduling.
+		birdsTripInputEl.value = tripId;
+		birdsFormEl.requestSubmit();
+		birdsTripInputEl.value = '';
+	}
+
+	// Load a complete scoped payload from cache when we have it; otherwise
+	// fetch. The cache is what makes a lost-ownership scoped fetch (see the
+	// enhance completion) recoverable without another round-trip.
+	function loadScopedFromCacheOrFetch(tripId: string) {
+		const cached = birdsScopedCache[birdsCacheKey(tripId)];
+		if (cached) {
+			claimAndClearCandidatePanel('birds');
+			itinBirdsSelectedTrip = tripId;
+			birdsCommittedTrip = tripId;
+			itinGeocode = false;
+			itinCandidates = withItinSelection(cached);
+			itinBirdsMsg = birdsSummaryMsg(cached);
+			return;
+		}
+		fetchBirdsTripScoped(tripId);
+	}
+
+	function onBirdsTripChange() {
+		if (itinBirdsTruncated && itinBirdsSelectedTrip) {
+			// The discovery payload may have cut this trip mid-list; use the
+			// complete scoped payload (cached or refetched) so the import is
+			// complete.
+			loadScopedFromCacheOrFetch(itinBirdsSelectedTrip);
+			return;
+		}
+		applyBirdsTripFilter();
+	}
+
+	function fetchBirdsManualTrip() {
+		const id = birdsManualTripId.trim();
+		const n = Number(id);
+		// Positive safe integer only — the server rejects anything else with a
+		// 400 rather than silently falling back to an unscoped fetch, and the
+		// client should not send known-bad values in the first place.
+		if (!/^\d+$/.test(id) || !Number.isSafeInteger(n) || n < 1) {
+			itinBirdsMsg = 'Enter a valid Birds trip id (a positive whole number).';
+			return;
+		}
+		loadScopedFromCacheOrFetch(String(n));
+	}
 	const itinImportParents = $derived(
 		data.itineraryRows.filter((r) => ['day', 'section', 'place'].includes(r.node.item_type))
 	);
@@ -367,6 +573,12 @@
 		if (itinImporting) return;
 		const selected = selectedItin(itinCandidates);
 		if (selected.length === 0) return;
+		// Capture (not claim) the panel generation the snapshot came from: if
+		// another producer takes the panel while the import is in flight, this
+		// completion must NOT clear or overwrite the newer panel — it imported
+		// the OLD snapshot, and stealing ownership at completion erases work
+		// the user started afterwards (peer CODEX, round 3).
+		const panelGen = candPanelGen;
 		itinImporting = true;
 		const fd = new FormData();
 		fd.set('candidates', JSON.stringify(selected));
@@ -374,11 +586,32 @@
 		fd.set('geocode', itinGeocode ? 'true' : 'false');
 		try {
 			const res = await fetch('?/itin-import-candidates', { method: 'POST', body: fd });
-			if (res.ok) {
-				itinCandidates = [];
-				itinExtractText = '';
-				itinExtractMsg = '';
+			// Parse the action result rather than trusting res.ok: a failed
+			// action must NOT clear the review panel (peer CODEX, branch E) —
+			// the user needs the candidates intact to adjust and retry.
+			const result = deserialize(await res.text());
+			if (result.type === 'success' && (result.data as { ok?: boolean } | undefined)?.ok) {
+				const imported = (result.data as { imported?: number }).imported ?? 0;
+				// Cache hygiene (peer CODEX, round 4): every cached/raw Birds
+				// payload carries duplicate annotations computed BEFORE this
+				// import — all of it is stale now. One fetch click rebuilds it
+				// with fresh marks; serving old annotations re-offers items
+				// that were just imported.
+				resetBirdsFetchState();
+				if (panelGen === candPanelGen) {
+					claimAndClearCandidatePanel(null);
+					itinExtractText = '';
+					itinExtractMsg = `Imported ${imported} item${imported === 1 ? '' : 's'}.`;
+				} else {
+					// The import really happened — say so — but the panel now
+					// belongs to a newer source and stays untouched.
+					itinExtractMsg = `Imported ${imported} item${imported === 1 ? '' : 's'} from the earlier selection.`;
+				}
 				await invalidateAll();
+			} else if (result.type === 'failure') {
+				itinExtractMsg =
+					(result.data as { error?: string } | undefined)?.error ??
+					'Import failed. Review the candidates and try again.';
 			} else {
 				itinExtractMsg = 'Import failed. Review the candidates and try again.';
 			}
@@ -2672,6 +2905,7 @@
 					<option value="note">note</option>
 				</select>
 				<input name="title" placeholder="Add a place / day / note…" required />
+				<input type="date" name="date" aria-label="date (optional)" class="itin-date" />
 				<textarea name="notes" rows="2" placeholder="Notes"></textarea>
 				<button class="btn small primary" type="submit">Add</button>
 			</form>
@@ -2681,6 +2915,10 @@
 					<input type="hidden" name="item_type" value="place" />
 					<textarea name="text" rows="4" placeholder="Palais des Papes&#10;Pont d'Avignon&#10;…"
 					></textarea>
+					<label class="paste-date">
+						Date for all (optional)
+						<input type="date" name="date" class="itin-date" />
+					</label>
 					<button class="btn small" type="submit">Add all</button>
 				</form>
 			</details>
@@ -2695,10 +2933,12 @@
 						action="?/itin-extract"
 						class="extract-form"
 						use:enhance={() => {
+							const panelGen = claimAndClearCandidatePanel();
 							itinExtracting = true;
 							itinExtractMsg = '';
 							return async ({ result }) => {
 								itinExtracting = false;
+								if (panelGen !== candPanelGen) return; // a newer source owns the panel
 								if (result.type === 'success' && result.data?.ok) {
 									const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
 									itinCandidates = withItinSelection(raw);
@@ -2745,10 +2985,12 @@
 						action="?/itin-extract-url"
 						class="extract-form"
 						use:enhance={() => {
+							const panelGen = claimAndClearCandidatePanel();
 							itinUrlExtracting = true;
 							itinUrlMsg = '';
 							return async ({ result }) => {
 								itinUrlExtracting = false;
+								if (panelGen !== candPanelGen) return; // a newer source owns the panel
 								if (result.type === 'success' && result.data?.ok) {
 									const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
 									itinCandidates = withItinSelection(raw);
@@ -2793,25 +3035,116 @@
 						method="POST"
 						action="?/itin-fetch-birds"
 						class="extract-form"
-						use:enhance={() => {
+						bind:this={birdsFormEl}
+						use:enhance={({ formData }) => {
+							// Everything about this request is captured HERE, at submit
+							// time — the completion below must never consult mutable
+							// globals to classify itself (two in-flight requests would
+							// corrupt the state machine; peer CODEX, round 1).
+							const scopedTrip = (formData.get('birds_trip_id') ?? '').toString();
+							// Discovery replaces the whole Birds context: reset FIRST
+							// (which also cancels any in-flight request by bumping the
+							// generation), THEN take this request's own generation so
+							// the reset cannot cancel it (peer CODEX, round 5).
+							if (!scopedTrip) resetBirdsFetchState();
+							const reqId = ++birdsReqSeq;
+							const panelGen = scopedTrip
+								? claimCandidatePanel()
+								: claimAndClearCandidatePanel('birds');
 							itinBirdsFetching = true;
-							itinBirdsMsg = '';
+							itinBirdsMsg = scopedTrip ? 'Fetching trip from Birds…' : '';
+							// The state produced by this request belongs to THIS username.
+							birdsStateUsername = (formData.get('username') ?? '').toString().trim();
 							return async ({ result }) => {
+								if (reqId !== birdsReqSeq) return; // a newer Birds request owns the state
 								itinBirdsFetching = false;
+								const scoped = scopedTrip !== '';
+								// The candidate PANEL may have been claimed by another
+								// source (text/URL/photo) while this was in flight; the
+								// Birds-local state below still updates, but the panel
+								// belongs to whoever wrote it last.
+								const ownsPanel = panelGen === candPanelGen;
 								if (result.type === 'success' && result.data?.ok) {
 									const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
-									itinCandidates = withItinSelection(raw);
-									itinGeocode = false;
-									if (raw.length === 0) {
-										itinBirdsMsg = 'No importable Birds places found.';
+									const trips = (result.data as { birdsTrips?: BirdsTripOption[] }).birdsTrips ?? [];
+									const truncated = (result.data as { truncated?: boolean }).truncated === true;
+									if (scoped) {
+										// Single-trip refetch: the discovery trip list stays,
+										// but its count for THIS trip is corrected from the
+										// complete scoped response.
+										if (truncated) {
+											birdsExactCounts = { ...birdsExactCounts, [scopedTrip]: -1 };
+											itinBirdsMsg =
+												'This trip alone has more places than one fetch can carry — its import cannot be complete.';
+											if (ownsPanel) {
+												itinCandidates = [];
+												birdsCommittedTrip = scopedTrip;
+											} else {
+												// Revert the dropdown so choosing this trip later
+												// is a real change event.
+												itinBirdsSelectedTrip = birdsCommittedTrip;
+											}
+										} else {
+											// Cache the complete payload regardless of panel
+											// ownership so the trip is loadable later without a
+											// refetch.
+											birdsScopedCache = {
+												...birdsScopedCache,
+												[birdsCacheKey(scopedTrip)]: raw
+											};
+											const summary = trips.find((t) => String(t.id) === scopedTrip);
+											if (summary) {
+												birdsExactCounts = {
+													...birdsExactCounts,
+													[scopedTrip]: summary.placeCount
+												};
+												// Manual-id path: a trip the truncated discovery
+												// never listed becomes selectable once fetched.
+												if (!itinBirdsTrips.some((t) => String(t.id) === scopedTrip)) {
+													itinBirdsTrips = [...itinBirdsTrips, summary];
+												}
+											}
+											if (ownsPanel) {
+												itinBirdsSelectedTrip = scopedTrip;
+												birdsCommittedTrip = scopedTrip;
+												itinGeocode = false;
+												itinCandidates = withItinSelection(raw);
+												itinBirdsMsg = birdsSummaryMsg(raw);
+											} else {
+												// Never leave a finished request labeled as
+												// fetching, and never steal the panel. REVERT the
+												// dropdown to the committed selection: the bind
+												// already moved it to the fetched trip before
+												// onchange fired, so without the revert,
+												// "select it in the dropdown" would re-select the
+												// same option and fire no change event (peer
+												// CODEX, browser QA). The payload is cached —
+												// choosing the trip loads it instantly.
+												itinBirdsSelectedTrip = birdsCommittedTrip;
+												itinBirdsMsg =
+													'Trip fetched — select it in the Trip dropdown to load its places.';
+											}
+										}
 									} else {
-										const dupes = raw.filter((c) => c.duplicate).length;
-										itinBirdsMsg = `${raw.length} Birds place${raw.length === 1 ? '' : 's'} found${dupes ? `, ${dupes} possible duplicate${dupes === 1 ? '' : 's'}` : ''}.`;
+										itinBirdsRaw = raw;
+										itinBirdsTrips = trips;
+										itinBirdsTruncated = truncated;
+										itinBirdsSelectedTrip = '';
+										if (ownsPanel) {
+											itinGeocode = false;
+											applyBirdsTripFilter();
+										} else {
+											itinBirdsMsg = `${trips.length} Birds trip${trips.length === 1 ? '' : 's'} fetched — pick one to load its places.`;
+										}
 									}
 								} else if (result.type === 'failure') {
+									// A failed scoped request also reverts the dropdown, so
+									// retrying by selecting the trip again is a real change.
+									if (scoped) itinBirdsSelectedTrip = birdsCommittedTrip;
 									itinBirdsMsg =
 										(result.data as { error?: string })?.error ?? 'Birds import failed.';
 								} else {
+									if (scoped) itinBirdsSelectedTrip = birdsCommittedTrip;
 									itinBirdsMsg = 'Birds import failed.';
 								}
 							};
@@ -2820,18 +3153,51 @@
 						<input
 							name="username"
 							bind:value={itinBirdsUsername}
+							oninput={onBirdsUsernameInput}
 							placeholder="Birds username (optional)"
 						/>
-						<input
-							name="birds_trip_id"
-							inputmode="numeric"
-							bind:value={itinBirdsTripId}
-							placeholder="Birds trip id (optional)"
-						/>
+						<input type="hidden" name="birds_trip_id" bind:this={birdsTripInputEl} />
 						<button class="btn small" type="submit" disabled={itinBirdsFetching}>
 							{itinBirdsFetching ? 'Fetching...' : 'Fetch Birds places'}
 						</button>
 					</form>
+					{#if itinBirdsTrips.length > 0}
+						<label class="birds-trip-filter">
+							Trip
+							<select
+								bind:value={itinBirdsSelectedTrip}
+								onchange={onBirdsTripChange}
+								disabled={itinBirdsFetching}
+							>
+								<option value="">
+									All trips ({itinBirdsRaw.length}{itinBirdsTruncated ? '+' : ''})
+								</option>
+								{#each itinBirdsTrips as t (t.id)}
+									<option value={String(t.id)}>
+										{t.name}{t.start_date ? ` — ${t.start_date}` : ''} ({birdsCountLabel(t)})
+									</option>
+								{/each}
+							</select>
+						</label>
+						{#if itinBirdsTruncated}
+							<div class="birds-manual-id">
+								<input
+									inputmode="numeric"
+									bind:value={birdsManualTripId}
+									placeholder="Trip id not listed above?"
+									aria-label="Birds trip id"
+								/>
+								<button
+									type="button"
+									class="btn small"
+									onclick={fetchBirdsManualTrip}
+									disabled={itinBirdsFetching || !birdsManualTripId.trim()}
+								>
+									Fetch trip
+								</button>
+							</div>
+						{/if}
+					{/if}
 					{#if itinBirdsMsg}<p class="extract-msg">{itinBirdsMsg}</p>{/if}
 				</div>
 			</details>
@@ -2881,10 +3247,12 @@
 						enctype="multipart/form-data"
 						class="extract-form"
 						use:enhance={() => {
+							const panelGen = claimAndClearCandidatePanel();
 							itinImageExtracting = true;
 							itinImageMsg = '';
 							return async ({ result }) => {
 								itinImageExtracting = false;
+								if (panelGen !== candPanelGen) return; // a newer source owns the panel
 								if (result.type === 'success' && result.data?.ok) {
 									const raw = (result.data as { candidates?: ItinCandidateRaw[] }).candidates ?? [];
 									itinCandidates = withItinSelection(raw);
@@ -2929,6 +3297,12 @@
 			</details>
 			{#if itinCandidates.length > 0}
 				<div class="candidates itinerary-candidates">
+					<!-- The whole review panel locks while an import is in flight: the
+					     import posts a SNAPSHOT, so any edit made after clicking
+					     Import would be silently discarded when success clears the
+					     panel (peer CODEX, round 4). A fieldset disables every
+					     descendant control natively. -->
+					<fieldset class="cand-lock" disabled={itinImporting}>
 					<div class="import-target">
 						<label class="import-parent">
 							Import under
@@ -2961,17 +3335,25 @@
 							class="btn small primary"
 							type="button"
 							onclick={importSelectedItinerary}
-							disabled={itinImporting || selectedItinCount() === 0}
+							disabled={itinImporting ||
+								selectedItinCount() === 0 ||
+								selectedItinCount() > MAX_IMPORT_ITEMS}
 						>
 							{itinImporting
 								? 'Importing...'
 								: `Import ${selectedItinCount()} item${selectedItinCount() === 1 ? '' : 's'}`}
 						</button>
+						{#if selectedItinCount() > MAX_IMPORT_ITEMS}
+							<p class="field-error" role="alert">
+								One import is limited to {MAX_IMPORT_ITEMS} items — narrow the selection
+								(e.g. pick a single trip) and import in batches.
+							</p>
+						{/if}
 						<button
 							class="btn small"
 							type="button"
 							onclick={() => {
-								itinCandidates = [];
+								claimAndClearCandidatePanel(null);
 								itinExtractMsg = '';
 								itinUrlMsg = '';
 								itinImageMsg = '';
@@ -2979,6 +3361,7 @@
 							}}>Clear</button
 						>
 					</div>
+					</fieldset>
 				</div>
 			{/if}
 		{/if}
@@ -4646,6 +5029,57 @@
 		/* Grid items default to min-width: auto — without this the card still
 		   refuses to shrink below its content. */
 		min-width: 0;
+	}
+	/* New controls (branch E) meet the ≥44px bar directly rather than joining
+	   the td-3b3f5e sweep. 16px font per cs.md input rule. */
+	.birds-trip-filter {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 8px;
+		font-size: 0.9rem;
+	}
+	.birds-trip-filter select {
+		flex: 1;
+		min-width: 0;
+		min-height: 44px;
+		font-size: 16px;
+	}
+	.birds-manual-id {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-top: 8px;
+	}
+	.birds-manual-id input {
+		flex: 1;
+		min-width: 0;
+		min-height: 44px;
+		font-size: 16px;
+	}
+	/* Invisible wrapper; only exists to disable every review-panel control
+	   while an import is in flight. pointer-events also covers any non-native
+	   click handler a fieldset's disabled state wouldn't reach. */
+	.cand-lock {
+		border: 0;
+		padding: 0;
+		margin: 0;
+		min-width: 0;
+	}
+	.cand-lock[disabled] {
+		pointer-events: none;
+		opacity: 0.7;
+	}
+	.itin-date {
+		min-height: 44px;
+		font-size: 16px;
+	}
+	.paste-date {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 6px 0;
+		font-size: 0.9rem;
 	}
 	/* The visited checkbox keeps its 22px glyph but the interactive target is
 	   the wrapping label at ≥44×44 (cs.md tap-target rule — this is a NEW

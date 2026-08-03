@@ -89,8 +89,16 @@ import {
 } from '$server/itinerary-extract';
 import { isGoogleMapsUrl } from '$server/google-maps-url';
 import { isAppleMapsUrl } from '$server/apple-maps-url';
-import { importItineraryCandidates, type ItineraryImportCandidate } from '$server/itinerary-import';
-import { BirdsPlacesError, fetchBirdsItineraryCandidates } from '$server/birds-places';
+import {
+	importItineraryCandidates,
+	ImportTooLargeError,
+	type ItineraryImportCandidate
+} from '$server/itinerary-import';
+import {
+	BirdsPlacesError,
+	fetchBirdsItineraryCandidates,
+	parseBirdsTripIdParam
+} from '$server/birds-places';
 import {
 	listAttachmentsForTrip,
 	uploadAttachment,
@@ -478,6 +486,8 @@ export const actions: Actions = {
 		const title = (form.get('title') ?? '').toString().trim();
 		if (!title) return fail(400, { error: 'Title is required.' });
 		const itemType = asType(form.get('item_type'));
+		const parsedDate = parsePlaceDate(form.get('date'));
+		if ('error' in parsedDate) return fail(400, { error: parsedDate.error });
 		const text = manualItineraryText(
 			itemType,
 			title,
@@ -487,7 +497,8 @@ export const actions: Actions = {
 			parent_id: optId(form.get('parent_id')),
 			item_type: itemType,
 			title: text.title,
-			notes: text.notes
+			notes: text.notes,
+			date: parsedDate.date
 		});
 		return { ok: true };
 	},
@@ -497,11 +508,14 @@ export const actions: Actions = {
 		await ownTrip(ownerId, tripId);
 		const form = await request.formData();
 		const lines = (form.get('text') ?? '').toString().split(/\r?\n/);
+		const parsedDate = parsePlaceDate(form.get('date'));
+		if ('error' in parsedDate) return fail(400, { error: parsedDate.error });
 		const n = await bulkCreate(
 			tripId,
 			optId(form.get('parent_id')),
 			asType(form.get('item_type')),
-			lines
+			lines,
+			parsedDate.date
 		);
 		return { ok: true, added: n };
 	},
@@ -607,14 +621,23 @@ export const actions: Actions = {
 		await ownTrip(ownerId, tripId);
 		const form = await request.formData();
 		const username = (form.get('username') ?? '').toString().trim() || null;
-		const birdsTripId = optId(form.get('birds_trip_id'));
+		// Strict parse: an invalid id must be a 400, not a silent fall-back to
+		// an unscoped all-trips fetch the client would mistake for scoped.
+		const parsedTripId = parseBirdsTripIdParam(form.get('birds_trip_id'));
+		if ('error' in parsedTripId) return fail(400, { error: parsedTripId.error });
+		const birdsTripId = parsedTripId.id;
 		const existing = await listItinerary(tripId);
 		try {
-			const candidates = await fetchBirdsItineraryCandidates({
+			const { candidates, trips, truncated } = await fetchBirdsItineraryCandidates({
 				username,
 				tripId: birdsTripId
 			});
-			return { ok: true, candidates: markDuplicates(candidates, existing) };
+			return {
+				ok: true,
+				candidates: markDuplicates(candidates, existing),
+				birdsTrips: trips,
+				truncated
+			};
 		} catch (err) {
 			if (err instanceof BirdsPlacesError) {
 				return fail(502, { error: err.message });
@@ -638,12 +661,17 @@ export const actions: Actions = {
 		if (!Array.isArray(candidates) || candidates.length === 0) {
 			return fail(400, { error: 'No itinerary candidates selected.' });
 		}
-		const imported = await importItineraryCandidates(tripId, candidates, {
-			parentId: optId(form.get('parent_id')),
-			geocode: form.get('geocode') !== 'false',
-			tripName: trip.name
-		});
-		return { ok: true, imported };
+		try {
+			const imported = await importItineraryCandidates(tripId, candidates, {
+				parentId: optId(form.get('parent_id')),
+				geocode: form.get('geocode') !== 'false',
+				tripName: trip.name
+			});
+			return { ok: true, imported };
+		} catch (err) {
+			if (err instanceof ImportTooLargeError) return fail(400, { error: err.message });
+			throw err;
+		}
 	},
 
 	'itin-edit': async ({ params, request, locals }) => {

@@ -5,7 +5,34 @@ import { ITEM_TYPES, type ItemType } from './itinerary';
 import { nextSortOrder } from './tree-sql';
 import type pg from 'pg';
 
-const MAX_ITEMS = 200;
+import { MAX_IMPORT_ITEMS } from '$lib/import-limits';
+
+/** Thrown instead of silently truncating an over-limit import: the UI offers
+ * up to 5,000 birds candidates, and a cap that slices quietly commits 200 and
+ * discards the rest while reporting success — the exact silent-partial-import
+ * class the truncation handling exists to prevent. */
+export class ImportTooLargeError extends Error {
+	constructor(public requested: number) {
+		super(
+			`Import of ${requested} items exceeds the ${MAX_IMPORT_ITEMS}-item limit — import a single trip or a smaller selection.`
+		);
+	}
+}
+
+// Defensive on purpose: the route only JSON-parses and Array.isArray-checks,
+// so hand-rolled payloads like [null] or [7] reach here — they must count as
+// (rejectable) items, not throw a 500 (prepareItem drops them later).
+function countCandidates(list: unknown): number {
+	if (!Array.isArray(list)) return 0;
+	let total = 0;
+	for (const item of list) {
+		total += 1;
+		if (item && typeof item === 'object') {
+			total += countCandidates((item as { children?: unknown }).children);
+		}
+	}
+	return total;
+}
 const MAX_META_BYTES = 5000;
 const DUPLICATE_COORD_KM = 0.03;
 const ITINERARY_IMPORT_LOCK_NS = 774747;
@@ -154,7 +181,9 @@ async function prepareItem(
 	options: ImportOptions,
 	count: { n: number }
 ): Promise<PreparedItem | null> {
-	if (count.n >= MAX_ITEMS || raw === null || typeof raw !== 'object') return null;
+	// The over-limit case is REJECTED up front in importItineraryCandidates
+	// (never silently dropped); this guard only backstops malformed nesting.
+	if (count.n >= MAX_IMPORT_ITEMS || raw === null || typeof raw !== 'object') return null;
 	const title = cleanString(raw.title, 500);
 	if (!title) return null;
 	const t = cleanString(raw.item_type, 20);
@@ -265,9 +294,11 @@ export async function importItineraryCandidates(
 	options: ImportOptions
 ): Promise<number> {
 	if (!Array.isArray(candidates) || candidates.length === 0) return 0;
+	const requested = countCandidates(candidates);
+	if (requested > MAX_IMPORT_ITEMS) throw new ImportTooLargeError(requested);
 	const count = { n: 0 };
 	const prepared: PreparedItem[] = [];
-	for (const candidate of candidates.slice(0, MAX_ITEMS)) {
+	for (const candidate of candidates) {
 		const item = await prepareItem(candidate, options, count);
 		if (item) prepared.push(item);
 	}

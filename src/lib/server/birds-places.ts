@@ -113,6 +113,14 @@ export function birdsPlacesToItineraryCandidates(
 	return places.map((place) => ({
 		item_type: 'place',
 		title: place.name,
+		// Only a genuine single-day trip pins a date on its places; for a
+		// range we would be guessing which day, so leave null and let the
+		// per-row date input in the review UI decide (td-2092b7).
+		date:
+			place.birds_trip_start_date &&
+			place.birds_trip_start_date === place.birds_trip_end_date
+				? place.birds_trip_start_date
+				: null,
 		notes: notesForBirdsPlace(place),
 		external_url: null,
 		address: null,
@@ -133,6 +141,44 @@ export function birdsPlacesToItineraryCandidates(
 	}));
 }
 
+export interface BirdsTripSummary {
+	id: number;
+	name: string;
+	start_date: string | null;
+	end_date: string | null;
+	placeCount: number;
+}
+
+/**
+ * Derive the trip list from the places payload — every place already carries
+ * its trip's id/name/dates, so grouping client-of-birds-side costs one pure
+ * function and zero birds deploys (td-428a1d). Sorted by start date, newest
+ * first; undated trips sink to the end.
+ */
+export function groupBirdsTrips(places: BirdsTripPlace[]): BirdsTripSummary[] {
+	const byId = new Map<number, BirdsTripSummary>();
+	for (const place of places) {
+		const existing = byId.get(place.birds_trip_id);
+		if (existing) {
+			existing.placeCount += 1;
+		} else {
+			byId.set(place.birds_trip_id, {
+				id: place.birds_trip_id,
+				name: place.birds_trip_name,
+				start_date: place.birds_trip_start_date,
+				end_date: place.birds_trip_end_date,
+				placeCount: 1
+			});
+		}
+	}
+	return [...byId.values()].sort((a, b) => {
+		if (a.start_date && b.start_date) return b.start_date.localeCompare(a.start_date);
+		if (a.start_date) return -1;
+		if (b.start_date) return 1;
+		return a.name.localeCompare(b.name);
+	});
+}
+
 function configuredBaseUrl(): string {
 	const base = env.BIRDS_API_BASE_URL?.trim();
 	if (!base) throw new BirdsPlacesError('Birds import is not configured: BIRDS_API_BASE_URL is missing.');
@@ -145,10 +191,45 @@ function configuredToken(): string {
 	return token;
 }
 
+/** Birds caps `limit` at 5000; ask for the cap so `truncated` in the
+ * response really means "more than the API can ever return in one call".
+ * BIRDS_IMPORT_FETCH_LIMIT (test envs only) lowers it so the truncation
+ * state machine is exercisable against a small fixture. */
+function birdsFetchLimit(): number {
+	const raw = Number(env.BIRDS_IMPORT_FETCH_LIMIT ?? '');
+	return Number.isSafeInteger(raw) && raw >= 1 && raw <= 5000 ? raw : 5000;
+}
+
+/**
+ * Parse the optional birds_trip_id form value. Absent/empty means "all
+ * trips"; anything present must be a positive safe integer. Deliberately NOT
+ * optId(): that helper maps invalid to null, and here null means an UNSCOPED
+ * discovery — so a malformed id would silently fetch everything while the
+ * client believes the request was scoped (peer CODEX, branch E round 2).
+ */
+export function parseBirdsTripIdParam(
+	raw: unknown
+): { id: number | null } | { error: string } {
+	const s = (raw ?? '').toString().trim();
+	if (!s) return { id: null };
+	if (!/^\d+$/.test(s)) return { error: 'Birds trip id must be a positive integer.' };
+	const n = Number(s);
+	if (!Number.isSafeInteger(n) || n < 1) {
+		return { error: 'Birds trip id must be a positive integer.' };
+	}
+	return { id: n };
+}
+
+export interface BirdsFetchResult {
+	candidates: ItineraryImportCandidate[];
+	trips: BirdsTripSummary[];
+	truncated: boolean;
+}
+
 export async function fetchBirdsItineraryCandidates(options: {
 	username?: string | null;
 	tripId?: number | null;
-} = {}): Promise<ItineraryImportCandidate[]> {
+} = {}): Promise<BirdsFetchResult> {
 	const requestId = randomUUID();
 	const started = Date.now();
 	let baseUrl: string;
@@ -169,6 +250,7 @@ export async function fetchBirdsItineraryCandidates(options: {
 	const username = options.username?.trim() || env.BIRDS_API_USERNAME?.trim();
 	if (username) url.searchParams.set('username', username);
 	if (options.tripId != null) url.searchParams.set('tripId', String(options.tripId));
+	url.searchParams.set('limit', String(birdsFetchLimit()));
 	logBirdsImport('info', 'fetch_start', {
 		request_id: requestId,
 		base_url: baseUrl,
@@ -238,14 +320,18 @@ export async function fetchBirdsItineraryCandidates(options: {
 	}
 	const places = rawPlaces.map(parseBirdsPlace).filter((place): place is BirdsTripPlace => place !== null);
 	const candidates = birdsPlacesToItineraryCandidates(places);
+	const trips = groupBirdsTrips(places);
+	const truncated = (body as { truncated?: unknown }).truncated === true;
 	logBirdsImport('info', 'fetch_success', {
 		request_id: requestId,
 		status: res.status,
 		raw_places: rawPlaces.length,
 		accepted_places: places.length,
 		candidates: candidates.length,
+		trips: trips.length,
+		truncated,
 		dropped_places: rawPlaces.length - places.length,
 		duration_ms: Date.now() - started
 	});
-	return candidates;
+	return { candidates, trips, truncated };
 }

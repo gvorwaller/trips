@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { query } from '$lib/db';
-import { setItemDate, setItemDates } from '$server/itinerary';
+import { bulkCreate, createItem, setItemDate, setItemDates } from '$server/itinerary';
+import {
+	importItineraryCandidates,
+	ImportTooLargeError,
+	type ItineraryImportCandidate
+} from '$server/itinerary-import';
+import { MAX_IMPORT_ITEMS } from '$lib/import-limits';
 
 async function makeTrip(): Promise<number> {
 	const owner = await query<{ id: number }>(
@@ -102,6 +108,120 @@ describe('setItemDates', () => {
 		const day = await addItem(tripId, 'day', 'D1');
 		await expect(setItemDates(tripId, [place, day], '2026-08-01')).rejects.toThrow();
 		expect(await dateOf(place)).toBeNull();
+		await query(`DELETE FROM trips WHERE id=$1`, [tripId]);
+	});
+});
+
+// td-2092b7: the creation paths themselves can set a date, so add / paste no
+// longer produce undated places when the user supplies one.
+describe('date on creation paths', () => {
+	it('createItem persists an optional date (the itin-add path)', async () => {
+		const tripId = await makeTrip();
+		const dated = await createItem(tripId, {
+			parent_id: null,
+			item_type: 'place',
+			title: 'Saturday market',
+			date: '2026-08-08'
+		});
+		const undated = await createItem(tripId, {
+			parent_id: null,
+			item_type: 'place',
+			title: 'Anytime cafe'
+		});
+		expect(await dateOf(dated)).toBe('2026-08-08');
+		expect(await dateOf(undated)).toBeNull();
+		await query(`DELETE FROM trips WHERE id=$1`, [tripId]);
+	});
+
+	it('bulkCreate applies one optional date to every pasted line', async () => {
+		const tripId = await makeTrip();
+		const n = await bulkCreate(tripId, null, 'place', ['One', 'Two', ' '], '2026-08-09');
+		expect(n).toBe(2);
+		const rows = await query<{ d: string | null }>(
+			`SELECT to_char(date,'YYYY-MM-DD') d FROM itinerary_items
+			  WHERE trip_id=$1 ORDER BY sort_order, id`,
+			[tripId]
+		);
+		expect(rows.rows.map((r) => r.d)).toEqual(['2026-08-09', '2026-08-09']);
+
+		const m = await bulkCreate(tripId, null, 'place', ['Three']);
+		expect(m).toBe(1);
+		const undated = await query<{ d: string | null }>(
+			`SELECT to_char(date,'YYYY-MM-DD') d FROM itinerary_items WHERE trip_id=$1 AND title='Three'`,
+			[tripId]
+		);
+		expect(undated.rows[0].d).toBeNull();
+		await query(`DELETE FROM trips WHERE id=$1`, [tripId]);
+	});
+});
+
+// Peer CODEX (branch E round 1): the import cap used to be a silent
+// slice(0, 200) — a 201-item birds trip showed "Import 201", committed 200,
+// and cleared the review panel. Over-limit is now an explicit rejection that
+// mutates NOTHING.
+describe('import batch limit is a rejection, not a silent slice', () => {
+	function candidate(n: number): ItineraryImportCandidate {
+		// Fixed-width unique titles: the importer's fuzzy duplicate matcher
+		// treats substring containment as a dupe ("Place 1" ⊂ "Place 1000"),
+		// and equal-length distinct strings can never contain each other.
+		return { item_type: 'place', title: `Spot ${String(n).padStart(4, '0')}z`, children: [] };
+	}
+
+	it('tolerates malformed candidate entries instead of throwing a 500', async () => {
+		const tripId = await makeTrip();
+		// The route only JSON-parses and Array.isArray-checks, so hand-rolled
+		// payloads like [null, 7] reach the importer — they must be counted
+		// and dropped, never crash the preflight counter.
+		const junk = [null, 7, { title: 42 }] as unknown as ItineraryImportCandidate[];
+		const imported = await importItineraryCandidates(tripId, junk, {
+			parentId: null,
+			geocode: false,
+			tripName: 'T'
+		});
+		expect(imported).toBe(0);
+		await query(`DELETE FROM trips WHERE id=$1`, [tripId]);
+	});
+
+	it(`rejects ${MAX_IMPORT_ITEMS + 1} candidates and inserts nothing`, async () => {
+		const tripId = await makeTrip();
+		const over = Array.from({ length: MAX_IMPORT_ITEMS + 1 }, (_, i) => candidate(i));
+		await expect(
+			importItineraryCandidates(tripId, over, { parentId: null, geocode: false, tripName: 'T' })
+		).rejects.toBeInstanceOf(ImportTooLargeError);
+		const count = await query<{ n: string }>(
+			`SELECT count(*) n FROM itinerary_items WHERE trip_id=$1`,
+			[tripId]
+		);
+		expect(Number(count.rows[0].n)).toBe(0);
+		await query(`DELETE FROM trips WHERE id=$1`, [tripId]);
+	});
+
+	it('counts NESTED children against the limit, and a full batch imports completely', async () => {
+		const tripId = await makeTrip();
+		// 100 parents × 1 child each = 200 total — exactly at the limit.
+		const atLimit = Array.from({ length: MAX_IMPORT_ITEMS / 2 }, (_, i) => ({
+			...candidate(i),
+			children: [candidate(1000 + i)]
+		}));
+		const imported = await importItineraryCandidates(tripId, atLimit, {
+			parentId: null,
+			geocode: false,
+			tripName: 'T'
+		});
+		expect(imported).toBe(MAX_IMPORT_ITEMS);
+
+		// One more child anywhere tips the total over: rejected outright.
+		const overNested = [
+			...atLimit,
+			{ ...candidate(9999), children: [] }
+		];
+		await expect(
+			importItineraryCandidates(tripId, overNested, {
+				parentId: null,
+				geocode: false,
+				tripName: 'T'
+			})
+		).rejects.toBeInstanceOf(ImportTooLargeError);
 		await query(`DELETE FROM trips WHERE id=$1`, [tripId]);
 	});
 });
