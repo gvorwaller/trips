@@ -733,7 +733,12 @@ select {
 		box-shadow: none;
 		padding: 0 0 3px;
 		margin: 0 0 6px;
-		break-inside: avoid;
+		/* Cards must be allowed to break across pages: with everything expanded
+		   for print a section card routinely exceeds one page, and Safari
+		   DROPS an oversized break-inside:avoid block entirely rather than
+		   paginating it (browser QA: the Expenses card vanished from the PDF).
+		   Row-level `li` atomicity below keeps individual lines intact. */
+		break-inside: auto;
 	}
 	h1 {
 		font-size: 16pt;

@@ -1224,11 +1224,6 @@
 	const packKey = $derived(`trips:${data.trip.id}:packCollapsed`);
 	const distanceUnitKey = $derived(`trips:${data.trip.id}:distanceUnit`);
 
-	/** Shared empty set, so the printing branch doesn't allocate per render. */
-	const EMPTY_FOLD: Set<number> = new Set();
-	// True only while a print snapshot is being taken. Every fold predicate
-	// consults it, so nothing collapsed is missing from the printed sheet.
-	let printing = $state(false);
 	let itinCollapsed = $state<Set<number>>(new Set());
 	let packCollapsed = $state<Set<number>>(new Set());
 
@@ -1377,14 +1372,18 @@
 	const packIndeterminate = (s?: { leaves: number; checked: number }) =>
 		!!s && s.checked > 0 && s.checked < s.leaves;
 
-	// Printing expands both trees too: a collapsed branch is absent from the DOM,
-	// so without this the printed sheet silently loses every folded Places and
-	// Packing descendant — the same regression the `printing` flag exists to stop.
-	const itinHidden = $derived(hiddenIds(data.itineraryRows, printing ? EMPTY_FOLD : itinCollapsed));
+	const itinHidden = $derived(hiddenIds(data.itineraryRows, itinCollapsed));
 	const itinParents = $derived(parentIds(data.itineraryRows));
+	// Folded rows stay in the DOM (hidden by the `.folded` class) so that
+	// `@media print` can reveal them: print correctness must not depend on any
+	// JS running at print time. An active search still *filters* — that is a
+	// query, not a fold, and print has always respected it.
 	const placesVisibleRows = $derived.by(() => {
-		if (placesQuery) return data.itineraryRows.filter(({ node }) => placesVisibleIds.has(node.id));
-		return data.itineraryRows.filter(({ node }) => !itinHidden.has(node.id));
+		if (placesQuery)
+			return data.itineraryRows
+				.filter(({ node }) => placesVisibleIds.has(node.id))
+				.map((row) => ({ ...row, folded: false }));
+		return data.itineraryRows.map((row) => ({ ...row, folded: itinHidden.has(row.node.id) }));
 	});
 
 	function toggled(set: Set<number>, key: string, id: number): Set<number> {
@@ -1427,9 +1426,7 @@
 		sections = toggleCollapse(sections, name, false);
 		if (browser) localStorage.setItem(sectionKey, serializeCollapseState(sections));
 	}
-	// `printing` short-circuits every fold predicate, so the section is collapsed
-	// only when the user says so AND we are not rendering for print.
-	const sectionCollapsed = (name: string) => !printing && isCollapsed(sections, name, false);
+	const sectionCollapsed = (name: string) => isCollapsed(sections, name, false);
 
 	// ── Per-plan collapse (td-1372a5) ──
 	// Day plans start COLLAPSED so the section reads as an index of days rather
@@ -1443,7 +1440,7 @@
 		if (browser) localStorage.setItem(dayPlanCardKey, serializeCollapseState(dayPlanCards));
 	}
 	const dayPlanCollapsed = (planId: number) =>
-		!printing && isCollapsed(dayPlanCards, planId, DAY_PLAN_DEFAULT_COLLAPSED);
+		isCollapsed(dayPlanCards, planId, DAY_PLAN_DEFAULT_COLLAPSED);
 
 	onMount(() => {
 		sections = parseCollapseState(localStorage.getItem(sectionKey));
@@ -1452,26 +1449,14 @@
 
 	// Print a one-page trip sheet (td-a2d073).
 	//
-	// Collapsed branches are removed from the DOM, so everything must be expanded
-	// while the print snapshot is taken. This used to clear the three fold sets
-	// and restore them in a `finally`, which had two problems: under a map,
-	// "cleared" no longer means expanded (an explicit `true` survives), and
-	// window.print() can return before the dialog closes or the snapshot is
-	// taken, so `finally` could re-hide content mid-print.
-	//
-	// Instead one flag overrides every predicate — sections, day-plan cards, and
-	// both trees — and it is lowered on `afterprint`, with a timeout only as a
-	// fallback for browsers that never fire it.
+	// No JS expansion happens here, deliberately. Folded content is hidden with
+	// the `.folded` class rather than removed from the DOM, and `@media print`
+	// reveals it — so print correctness never depends on event timing. The
+	// previous design raised a `printing` flag and lowered it on `afterprint`,
+	// but Safari paginates its preview lazily and can fire `afterprint` before
+	// the tail pages render, which silently truncated the printed sheet
+	// (browser QA caught the Expenses section missing).
 	function printSheet() {
-		printing = true;
-		flushSync();
-		const done = () => {
-			printing = false;
-			window.removeEventListener('afterprint', done);
-			clearTimeout(fallback);
-		};
-		window.addEventListener('afterprint', done);
-		const fallback = setTimeout(done, 60_000);
 		window.print();
 	}
 
@@ -1618,7 +1603,7 @@
 		{/if}
 	</div>
 
-	{#if !sectionCollapsed('dayplans')}
+	<div class="fold" class:folded={sectionCollapsed('dayplans')}>
 		<details class="dayplan-help">
 			<summary>How day plans work</summary>
 			<div class="dayplan-help-body">
@@ -1810,9 +1795,9 @@
 						</div>
 
 						<!-- The app's own disclosure rather than <details open>: <details>
-						     fires ontoggle during hydration and during the programmatic
-						     print expansion, which fights the persisted state. This also
-						     matches the six section-toggle controls elsewhere. -->
+						     fires ontoggle during hydration, which fights the persisted
+						     state. This also matches the six section-toggle controls
+						     elsewhere. -->
 						<button
 							type="button"
 							class="dayplan-toggle"
@@ -1825,8 +1810,10 @@
 								<span class="muted collapsed-summary">{summary}</span>
 							{/if}
 						</button>
-						{#if !dayPlanCollapsed(plan.id)}
-							<div class="dayplan-stops-section">
+						<div
+							class="dayplan-stops-section fold"
+							class:folded={dayPlanCollapsed(plan.id)}
+						>
 								{#if stops.length === 0}
 									<p class="muted">No stops saved.</p>
 								{:else}
@@ -2142,8 +2129,7 @@
 										{/if}
 									{/if}
 								{/if}
-							</div>
-						{/if}
+						</div>
 
 						{#if !isViewer}
 							<details class="edit">
@@ -2393,7 +2379,7 @@
 				</div>
 			</form>
 		{/if}
-	{/if}
+	</div>
 </div>
 
 <!-- ── PLACES ─────────────────────────────────────────── -->
@@ -2408,7 +2394,7 @@
 		</a>
 	</div>
 
-	{#if !sectionCollapsed('places')}
+	<div class="fold" class:folded={sectionCollapsed('places')}>
 		{#if data.itineraryRows.length > 0}
 			<PinMap {pins} onselect={selectPin} />
 		{/if}
@@ -2457,7 +2443,7 @@
 				<p class="muted places-empty">No places match "{placesSearch.trim()}".</p>
 			{:else}
 				<ul class="outline places-outline">
-					{#each placesVisibleRows as { node, depth } (node.id)}
+					{#each placesVisibleRows as { node, depth, folded } (node.id)}
 						{@const route =
 							node.item_type === 'day' || node.item_type === 'section'
 								? dayDirections(node.id)
@@ -2465,6 +2451,7 @@
 						<li
 							id="itin-{node.id}"
 							style="padding-left: {depth * 22}px"
+							class:folded
 							class:flash={selectedPin === node.id}
 							class:search-match={!!placesQuery && placesDirectMatchIds.has(node.id)}
 						>
@@ -2921,7 +2908,7 @@
 				</div>
 			{/if}
 		{/if}
-	{/if}
+	</div>
 </div>
 
 <!-- ── PACKING ────────────────────────────────────────── -->
@@ -2933,9 +2920,9 @@
 		</button>
 		<a class="btn small packing-print-btn" href={packingPrintHref}>🖨 Print packing</a>
 	</div>
-	{#if !sectionCollapsed('packing')}
+	<div class="fold" class:folded={sectionCollapsed('packing')}>
 		{#each data.packing as { list, rows, total, checked } (list.id)}
-			{@const packHidden = hiddenIds(rows, printing ? EMPTY_FOLD : packCollapsed)}
+			{@const packHidden = hiddenIds(rows, packCollapsed)}
 			{@const packParents = parentIds(rows)}
 			{@const packStats = leafStats(rows)}
 			<section class="plist">
@@ -2975,8 +2962,7 @@
 
 				<ul class="outline">
 					{#each rows as { node, depth } (node.id)}
-						{#if !packHidden.has(node.id)}
-							{#if !isViewer && isInserting(node.id, 'above')}{@render packInsertForm(
+							{#if !isViewer && !packHidden.has(node.id) && isInserting(node.id, 'above')}{@render packInsertForm(
 									list.id,
 									node.id,
 									'above',
@@ -2984,6 +2970,7 @@
 								)}{/if}
 							<li
 								style="padding-left: {depth * 22}px"
+								class:folded={packHidden.has(node.id)}
 								class:drop-before={dropTarget?.id === node.id && dropTarget?.pos === 'before'}
 								class:drop-after={dropTarget?.id === node.id && dropTarget?.pos === 'after'}
 								ondragover={(e) => onRowDragOver(e, list.id, node.id)}
@@ -3094,13 +3081,12 @@
 									</details>
 								{/if}
 							</li>
-							{#if !isViewer && isInserting(node.id, 'below')}{@render packInsertForm(
+							{#if !isViewer && !packHidden.has(node.id) && isInserting(node.id, 'below')}{@render packInsertForm(
 									list.id,
 									node.id,
 									'below',
 									depth
 								)}{/if}
-						{/if}
 					{/each}
 				</ul>
 
@@ -3174,7 +3160,7 @@
 				{/if}
 			</div>
 		{/if}
-	{/if}
+	</div>
 </div>
 
 <!-- ── RESERVATIONS ───────────────────────────────────── -->
@@ -3183,7 +3169,7 @@
 		<span class="section-caret">{sectionCollapsed('reservations') ? '▸' : '▾'}</span>
 		<h2>Reservations</h2>
 	</button>
-	{#if !sectionCollapsed('reservations')}
+	<div class="fold" class:folded={sectionCollapsed('reservations')}>
 		{#if data.reservations.length === 0}
 			<p class="muted">No reservations yet.</p>
 		{:else}
@@ -3398,7 +3384,7 @@
 				</form>
 			</details>
 		{/if}
-	{/if}
+	</div>
 </div>
 
 <!-- ── ATTACHMENTS ────────────────────────────────────── -->
@@ -3407,7 +3393,7 @@
 		<span class="section-caret">{sectionCollapsed('documents') ? '▸' : '▾'}</span>
 		<h2>Documents</h2>
 	</button>
-	{#if !sectionCollapsed('documents')}
+	<div class="fold" class:folded={sectionCollapsed('documents')}>
 		{#if data.attachments.length === 0}
 			<p class="muted">No documents yet.</p>
 		{:else}
@@ -3508,7 +3494,7 @@
 				</p>
 			</details>
 		{/if}
-	{/if}
+	</div>
 </div>
 
 <!-- ── EXPENSES ──────────────────────────────────────── -->
@@ -3518,7 +3504,7 @@
 		<h2>Expenses</h2>
 		<span class="expense-total">{fmtAmount(expenseTotal)}</span>
 	</button>
-	{#if !sectionCollapsed('expenses')}
+	<div class="fold" class:folded={sectionCollapsed('expenses')}>
 		{#if data.expenses.length === 0}
 			<p class="muted">No expenses yet.</p>
 		{:else}
@@ -3865,7 +3851,7 @@
 				</form>
 			</details>
 		{/if}
-	{/if}
+	</div>
 </div>
 
 <!-- ── Trip actions ───────────────────────────────────── -->
@@ -4587,11 +4573,25 @@
 		   refuses to shrink below its content. */
 		min-width: 0;
 	}
+	/* Folded content stays in the DOM so `@media print` can reveal it — print
+	   correctness must never depend on JS running at print time (Safari fires
+	   `afterprint` before its lazy pagination finishes). */
+	.fold.folded,
+	.folded {
+		display: none !important;
+	}
 	.dayplan-head {
 		display: flex;
 		align-items: flex-start;
 		justify-content: space-between;
 		gap: 10px;
+		/* Let the actions row wrap below the title instead of starving it —
+		   a wide actions row (e.g. the too-many-stops warning) was squeezing
+		   the title to one character per line. */
+		flex-wrap: wrap;
+	}
+	.dayplan-head > .grow {
+		flex-basis: 240px;
 	}
 	.dayplan-actions {
 		display: flex;
@@ -5342,6 +5342,17 @@
 		}
 	}
 	@media print {
+		/* Reveal everything folded on screen: `revert` lands on the UA default
+		   (block / list-item), and this rule is after the screen rule so it wins. */
+		.fold.folded,
+		.folded {
+			display: revert !important;
+		}
+		/* The folded-card driving summary would duplicate the card's own meta
+		   line once the stops are revealed. */
+		.dayplan-toggle .collapsed-summary {
+			display: none !important;
+		}
 		.dayplan-actions,
 		.dayplan-stop-links,
 		.dayplan-note-form,
@@ -5353,6 +5364,13 @@
 		.dayplan-card {
 			border: none;
 			padding: 0;
+			/* `avoid` on a block that can exceed one page makes Safari drop it
+			   from the PDF entirely (see .card in app.css) — a many-stop plan
+			   card can be that tall, so it must be breakable. The head stays
+			   atomic; per-stop rows are kept whole by app.css's `li` rule. */
+			break-inside: auto;
+		}
+		.dayplan-head {
 			break-inside: avoid;
 		}
 		.dayplan-stops-section {
