@@ -21,6 +21,7 @@ import { setItemVisited } from '$server/itinerary';
 import { actions as settingsActions } from '../../routes/settings/+page.server';
 import { actions as placeActions } from '../../routes/trips/[id]/place/[itemId]/+page.server';
 import { GET as dayPlanExport } from '../../routes/trips/[id]/dayplan/[planId]/export/+server';
+import { GET as tripExport } from '../../routes/trips/[id]/export/+server';
 import { load as dayPlanPrintLoad } from '../../routes/trips/[id]/dayplan/[planId]/print/+page.server';
 
 const U = {
@@ -483,6 +484,50 @@ describe('day plan export stays owner-scoped', () => {
 		).rows[0].id;
 		await expect(dayPlanExport(exportEvent(a, a, 'admin', otherPlan))).rejects.toMatchObject({
 			status: 404
+		});
+	});
+});
+
+// td-359579: the WHOLE-trip export is a bigger download surface than one day
+// — same probes, same policy.
+describe('trip-level export stays owner-scoped', () => {
+	function tripEvent(ownerId: number, userId: number, role: string, format = 'txt') {
+		return {
+			params: { id: String(tripA) },
+			locals: {
+				user: { id: userId, username: 'x', role, display_name: 'x', views_user_id: null },
+				ownerId
+			},
+			url: new URL(`http://localhost/x?format=${format}`)
+		} as never;
+	}
+
+	it("B cannot export A's trip", async () => {
+		await expect(tripExport(tripEvent(b, b, 'user'))).rejects.toMatchObject({ status: 404 });
+	});
+
+	it("A exports A's trip with the private-download policy and no expenses", async () => {
+		const res = await tripExport(tripEvent(a, a, 'admin'));
+		expect(res.status).toBe(200);
+		expect(res.headers.get('Cache-Control')).toBe('private, no-store');
+		expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+		const text = await res.text();
+		expect(text).toContain(`A place ${MARK}`);
+		expect(text).toContain('A plan');
+		// The fixture's expense description must never appear; the omission
+		// footer must.
+		expect(text).not.toContain(`A expense ${MARK}`);
+		expect(text).toContain('Not included: expenses');
+	});
+
+	it('viewer V can export the account it reads', async () => {
+		const res = await tripExport(tripEvent(a, v, 'viewer'));
+		expect(res.status).toBe(200);
+	});
+
+	it('an unknown format is a 400', async () => {
+		await expect(tripExport(tripEvent(a, a, 'admin', 'pdf'))).rejects.toMatchObject({
+			status: 400
 		});
 	});
 });

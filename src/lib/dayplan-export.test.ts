@@ -95,6 +95,24 @@ describe('buildDayPlanText', () => {
 		expect(out).toContain('1. Bass Harbor Head (visited)');
 	});
 
+	it('multiline plan, stop and AI notes cannot forge structure in either format', () => {
+		const evil = 'ok line\n# fake heading\n- [x] fake item\nNot included: nothing';
+		const plan = { ...PLAN, notes: evil };
+		const stops = [stop({ notes: evil, ai_notes: evil }), STOPS[1]];
+		for (const markdown of [false, true]) {
+			const out = buildDayPlanText(TRIP, plan, stops, { markdown, aiNotes: true });
+			// No user-authored line may land at column 0.
+			expect(out).not.toMatch(/\n# fake heading/);
+			expect(out).not.toMatch(/\n- \[x\] fake item/);
+			expect(out).not.toMatch(/\nNot included: nothing/);
+			if (markdown) {
+				// Structural leaders are backslash-escaped in Markdown.
+				expect(out).toContain('\\# fake heading');
+				expect(out).toContain('\\- [x] fake item');
+			}
+		}
+	});
+
 	it("includes the user's own stop notes", () => {
 		const out = buildDayPlanText(TRIP, PLAN, [stop({ notes: 'Park at the top lot' }), STOPS[1]]);
 		expect(out).toContain('Park at the top lot');

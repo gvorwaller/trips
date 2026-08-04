@@ -26,6 +26,19 @@ export interface AttachmentLinks {
 	display_name?: string | null;
 }
 
+/** Count of active attachments only — for surfaces (like the trip export)
+ * that promise attachment CONTENTS are omitted, the omission must hold at
+ * the data-fetch layer too: listAttachmentsForTrip selects every document's
+ * full text_content, which is megabytes of memory for a `.length`
+ * (peer CODEX, td-359579 round 1). */
+export async function countAttachmentsForTrip(tripId: number): Promise<number> {
+	const res = await query<{ n: string }>(
+		`SELECT count(*) AS n FROM attachments WHERE trip_id = $1 AND status = 'active'`,
+		[tripId]
+	);
+	return Number(res.rows[0].n);
+}
+
 /** Active attachments for a trip (newest first). */
 export async function listAttachmentsForTrip(tripId: number): Promise<Attachment[]> {
 	const res = await query<Attachment>(

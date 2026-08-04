@@ -86,6 +86,13 @@ export interface ExportOptions {
 	 * the builder so tests stay deterministic.
 	 */
 	generatedAt?: Date | string;
+	/**
+	 * Markdown heading depth for the plan title (default 1). The trip-level
+	 * export (td-359579) embeds each day as a SECTION of a larger document, so
+	 * it renders plans at depth 2 — same builder, zero drift between the
+	 * standalone day export and the day-inside-a-trip export.
+	 */
+	headingDepth?: 1 | 2;
 }
 
 /**
@@ -99,13 +106,34 @@ export const MOBILE_WAYPOINT_LIMIT = 3;
 /** Google Maps URLs are capped at 2,048 characters (same doc). */
 export const MAX_MAPS_URL_LENGTH = 2048;
 
-export function slugify(s: string): string {
+/**
+ * Every LINE of user-authored text gets its block's indentation, and in
+ * Markdown mode any line-leading structural marker (#, -, >, 1., fences) is
+ * backslash-escaped — a note's second line at column 0 can otherwise forge a
+ * peer heading, a checklist item, or the trip export's omissions footer
+ * (peer CODEX, td-359579 rounds 1–2). Lives here so the standalone day
+ * export and the day-embedded-in-a-trip export share one implementation.
+ */
+export function prefixedLines(text: string, pad: string, md: boolean): string[] {
+	return text
+		.trim()
+		.split(/\r?\n/)
+		.map((line) => {
+			let out = line.trimEnd();
+			if (md && /^(#{1,6} |[-*+] |\d+\. |>|\`\`\`)/.test(out.trimStart())) {
+				out = out.replace(/^(\s*)/, '$1\\');
+			}
+			return `${pad}${out}`;
+		});
+}
+
+export function slugify(s: string, fallback = 'day-plan'): string {
 	const out = s
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, '-')
 		.replace(/^-+|-+$/g, '')
 		.slice(0, 60);
-	return out || 'day-plan';
+	return out || fallback;
 }
 
 export function formatPlanDate(isoDate: string | null): string | null {
@@ -187,8 +215,9 @@ export function buildDayPlanText(
 	const anchor = anchorOf(plan);
 	const lines: string[] = [];
 
-	const h1 = opts.markdown ? '# ' : '';
-	const h2 = opts.markdown ? '## ' : '';
+	const depth = opts.headingDepth ?? 1;
+	const h1 = opts.markdown ? '#'.repeat(depth) + ' ' : '';
+	const h2 = opts.markdown ? '#'.repeat(depth + 1) + ' ' : '';
 	lines.push(`${h1}${plan.title}`, '');
 	lines.push(`Trip: ${trip.name}`);
 	const when = formatPlanDate(plan.optional_date);
@@ -200,7 +229,7 @@ export function buildDayPlanText(
 	if (summary) lines.push(`Driving: ${summary}`);
 	lines.push('');
 
-	if (plan.notes) lines.push(plan.notes.trim(), '');
+	if (plan.notes) lines.push(...prefixedLines(plan.notes, '  ', opts.markdown === true), '');
 
 	if (stops.length === 0) {
 		lines.push('No stops yet.', '');
@@ -210,8 +239,9 @@ export function buildDayPlanText(
 			const leg = legSummary(i > 0 ? stops[i - 1] : null, stop, anchor, unit);
 			lines.push(`${i + 1}. ${stop.snapshot_title}${stop.visited ? ' (visited)' : ''}`);
 			if (leg) lines.push(`   Drive from ${i === 0 && base ? base : 'previous'}: ${leg}`);
-			if (stop.notes) lines.push(`   ${stop.notes.trim()}`);
-			if (opts.aiNotes && stop.ai_notes) lines.push(`   ${stop.ai_notes.trim()}`);
+			if (stop.notes) lines.push(...prefixedLines(stop.notes, '   ', opts.markdown === true));
+			if (opts.aiNotes && stop.ai_notes)
+				lines.push(...prefixedLines(stop.ai_notes, '   ', opts.markdown === true));
 			// Bare URLs so Messages linkifies them.
 			lines.push(`   Apple: ${appleMapsLink(placeOf(stop))}`);
 			lines.push(`   Google: ${googleMapsLink(placeOf(stop))}`);
