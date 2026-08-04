@@ -8,7 +8,9 @@
 // designed).
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { closePool, query, withTransaction } from '$lib/db';
-import { deleteItem, setItemVisited } from '$server/itinerary';
+import { deleteItem, setItemDates, setItemVisited } from '$server/itinerary';
+import { createPackingItemAt, setPackingItemChecked } from '$server/packing';
+import { runTreeOp } from '$server/tree-sql';
 import {
 	addStop,
 	duplicateDayPlan,
@@ -706,6 +708,250 @@ describe('cascade deletes follow the canonical lock order (td-36b55b)', () => {
 		);
 		expect(orphaned.rows[0].itinerary_item_id).toBeNull();
 		await query(`DELETE FROM day_plan_stops WHERE id = $1`, [doomedStop]);
+	});
+
+	it('a tree move racing a subtree delete resolves without deadlock', async () => {
+		// Peer CODEX's round-1 repro: move-up applied its UPDATEs in caller
+		// order, so the first UPDATE took trips (0010 trigger) and the second
+		// waited on the parked delete's item lock while the delete waited on
+		// trips — 40P01. applyChanges now prelocks every changed row before
+		// its first UPDATE, so the move parks cleanly and, once the subtree
+		// is gone, its UPDATEs are no-ops.
+		const root = (
+			await query<{ id: number }>(
+				`INSERT INTO itinerary_items (trip_id, item_type, title) VALUES ($1, 'section', 'Race root') RETURNING id`,
+				[tripId]
+			)
+		).rows[0].id;
+		const yPlace = (
+			await query<{ id: number }>(
+				`INSERT INTO itinerary_items (trip_id, parent_id, item_type, title, lat, lon, sort_order)
+				 VALUES ($1, $2, 'place', 'Race Y', 45.6, -69.6, 0) RETURNING id`,
+				[tripId, root]
+			)
+		).rows[0].id;
+		const zPlace = (
+			await query<{ id: number }>(
+				`INSERT INTO itinerary_items (trip_id, parent_id, item_type, title, lat, lon, sort_order)
+				 VALUES ($1, $2, 'place', 'Race Z', 45.7, -69.7, 1) RETURNING id`,
+				[tripId, root]
+			)
+		).rows[0].id;
+		const yStop = (
+			await query<{ id: number }>(
+				`INSERT INTO day_plan_stops (day_plan_id, itinerary_item_id, snapshot_title)
+				 VALUES ($1, $2, 'Race Y') RETURNING id`,
+				[plan1, yPlace]
+			)
+		).rows[0].id;
+
+		let release!: () => void;
+		const released = new Promise<void>((r) => (release = r));
+		let lockTaken!: () => void;
+		const lockTakenP = new Promise<void>((r) => (lockTaken = r));
+		const holder = withTransaction(async (client) => {
+			await client.query(`SELECT id FROM day_plan_stops WHERE id = $1 FOR UPDATE`, [yStop]);
+			lockTaken();
+			await released;
+		});
+		await lockTakenP;
+		const deleting = deleteItem(tripId, root);
+		await new Promise((r) => setTimeout(r, 150)); // delete parks on yStop
+		const moving = runTreeOp('itinerary_items', tripId, zPlace, 'move-up').then(
+			() => 'ok' as const,
+			(e) => e as Error
+		);
+		await new Promise((r) => setTimeout(r, 150)); // move parks on the item locks
+		release();
+		await holder;
+		expect(await deleting).toBe(true);
+		const moved = await moving;
+		// The move must not 40P01 — it either no-ops (rows already gone) or
+		// errored cleanly on a vanished container, never a deadlock.
+		if (moved !== 'ok') {
+			expect((moved as { code?: string }).code).not.toBe('40P01');
+		}
+		await query(`DELETE FROM day_plan_stops WHERE id = $1`, [yStop]);
+	});
+
+	it('a child committed mid-prelock is still swept into the lock set', async () => {
+		// Peer CODEX's second repro: the recursive subtree SELECT's snapshot
+		// cannot see a child committed while the statement waits on the
+		// parent's lock, so the child and its stop escaped the prelock. The
+		// fixpoint re-enumeration closes it: this fixture commits the child
+		// WHILE deleteItem is parked on the parent's key-share.
+		const root = (
+			await query<{ id: number }>(
+				`INSERT INTO itinerary_items (trip_id, item_type, title) VALUES ($1, 'section', 'Fixpoint root') RETURNING id`,
+				[tripId]
+			)
+		).rows[0].id;
+
+		let insertDone!: () => void;
+		const insertedP = new Promise<void>((r) => (insertDone = r));
+		let release!: () => void;
+		const released = new Promise<void>((r) => (release = r));
+		let childId = 0;
+		const creator = withTransaction(async (client) => {
+			const c = await client.query<{ id: number }>(
+				`INSERT INTO itinerary_items (trip_id, parent_id, item_type, title, lat, lon)
+				 VALUES ($1, $2, 'place', 'Late child', 45.8, -69.8) RETURNING id`,
+				[tripId, root]
+			);
+			childId = c.rows[0].id;
+			await client.query(
+				`INSERT INTO day_plan_stops (day_plan_id, itinerary_item_id, snapshot_title)
+				 VALUES ($1, $2, 'Late child')`,
+				[plan1, childId]
+			);
+			insertDone();
+			await released; // hold the uncommitted insert (FK key-share on root)
+		});
+		await insertedP;
+		const deleting = deleteItem(tripId, root);
+		await new Promise((r) => setTimeout(r, 200)); // delete parks behind the key-share
+		release();
+		await creator;
+		expect(await deleting).toBe(true);
+
+		const remaining = await query<{ n: string }>(
+			`SELECT count(*) n FROM itinerary_items WHERE id = ANY($1::int[])`,
+			[[root, childId]]
+		);
+		expect(Number(remaining.rows[0].n)).toBe(0);
+		const orphan = await query<{ itinerary_item_id: number | null }>(
+			`SELECT itinerary_item_id FROM day_plan_stops WHERE snapshot_title = 'Late child'`
+		);
+		expect(orphan.rows[0]?.itinerary_item_id ?? null).toBeNull();
+		await query(`DELETE FROM day_plan_stops WHERE snapshot_title = 'Late child'`);
+	});
+
+	it('setItemDates racing a subtree delete resolves without deadlock', async () => {
+		// Pre-fix, the single multi-row UPDATE visited rows in unspecified
+		// order — it could hold a later row plus trips while seeking an
+		// earlier row the parked delete held. The id-ordered prelock parks it
+		// cleanly instead; once the subtree is gone its count check fails
+		// with the function's own transactional error, never a 40P01.
+		const root = (
+			await query<{ id: number }>(
+				`INSERT INTO itinerary_items (trip_id, item_type, title) VALUES ($1, 'section', 'Dates root') RETURNING id`,
+				[tripId]
+			)
+		).rows[0].id;
+		const inside = (
+			await query<{ id: number }>(
+				`INSERT INTO itinerary_items (trip_id, parent_id, item_type, title, lat, lon)
+				 VALUES ($1, $2, 'place', 'Dates inside', 45.9, -69.9) RETURNING id`,
+				[tripId, root]
+			)
+		).rows[0].id;
+		const insideStop = (
+			await query<{ id: number }>(
+				`INSERT INTO day_plan_stops (day_plan_id, itinerary_item_id, snapshot_title)
+				 VALUES ($1, $2, 'Dates inside') RETURNING id`,
+				[plan1, inside]
+			)
+		).rows[0].id;
+
+		let release!: () => void;
+		const released = new Promise<void>((r) => (release = r));
+		let lockTaken!: () => void;
+		const lockTakenP = new Promise<void>((r) => (lockTaken = r));
+		const holder = withTransaction(async (client) => {
+			await client.query(`SELECT id FROM day_plan_stops WHERE id = $1 FOR UPDATE`, [
+				insideStop
+			]);
+			lockTaken();
+			await released;
+		});
+		await lockTakenP;
+		const deleting = deleteItem(tripId, root);
+		await new Promise((r) => setTimeout(r, 150)); // delete parks on the stop
+		const dating = setItemDates(tripId, [inside, place], '2026-08-15').then(
+			() => 'ok' as const,
+			(e) => e as Error
+		);
+		await new Promise((r) => setTimeout(r, 150)); // dates park at the prelock
+		release();
+		await holder;
+		expect(await deleting).toBe(true);
+		const dated = await dating;
+		// The delete removed `inside`, so the all-or-nothing count check must
+		// reject — cleanly, not via deadlock.
+		expect(dated).not.toBe('ok');
+		expect((dated as { code?: string }).code).not.toBe('40P01');
+		expect((dated as Error).message).toMatch(/could not be updated/);
+		// All-or-nothing held: the surviving place was not dated.
+		const survivor = await query<{ d: string | null }>(
+			`SELECT to_char(date,'YYYY-MM-DD') d FROM itinerary_items WHERE id = $1`,
+			[place]
+		);
+		expect(survivor.rows[0].d).toBeNull();
+		await query(`DELETE FROM day_plan_stops WHERE id = $1`, [insideStop]);
+	});
+
+	it('recursive packing check racing a packing tree move resolves without deadlock', async () => {
+		const list = (
+			await query<{ id: number }>(
+				`INSERT INTO packing_lists (trip_id, name) VALUES ($1, 'Race list') RETURNING id`,
+				[tripId]
+			)
+		).rows[0].id;
+		const parent = (
+			await query<{ id: number }>(
+				`INSERT INTO packing_items (list_id, name, sort_order) VALUES ($1, 'Race parent', 0) RETURNING id`,
+				[list]
+			)
+		).rows[0].id;
+		const child1 = (
+			await query<{ id: number }>(
+				`INSERT INTO packing_items (list_id, parent_id, name, sort_order) VALUES ($1, $2, 'Race child 1', 0) RETURNING id`,
+				[list, parent]
+			)
+		).rows[0].id;
+		const child2 = (
+			await query<{ id: number }>(
+				`INSERT INTO packing_items (list_id, parent_id, name, sort_order) VALUES ($1, $2, 'Race child 2', 1) RETURNING id`,
+				[list, parent]
+			)
+		).rows[0].id;
+
+		let release!: () => void;
+		const released = new Promise<void>((r) => (release = r));
+		let lockTaken!: () => void;
+		const lockTakenP = new Promise<void>((r) => (lockTaken = r));
+		const holder = withTransaction(async (client) => {
+			await client.query(`SELECT id FROM packing_items WHERE id = $1 FOR UPDATE`, [child2]);
+			lockTaken();
+			await released;
+		});
+		await lockTakenP;
+		// Both writers park at trigger-free prelocks (list-wide for the check,
+		// changed-set for the move) instead of holding trips mid-flight.
+		const checking = setPackingItemChecked(userId, parent, true);
+		const moving = runTreeOp('packing_items', list, child2, 'move-up');
+		// Also exercise the insert-at path against the same held lock — its
+		// INSERT used to fire the trips trigger before any sibling lock.
+		const inserting = createPackingItemAt(list, child1, 'below', {
+			name: 'Race insert',
+			quantity: 1,
+			category: null,
+			notes: null
+		});
+		await new Promise((r) => setTimeout(r, 200));
+		release();
+		await holder;
+		expect(await checking).toBe(true);
+		await moving; // must settle without 40P01
+		expect(await inserting).not.toBeNull();
+		const checkedRows = await query<{ n: string }>(
+			`SELECT count(*) n FROM packing_items WHERE list_id = $1 AND checked`,
+			[list]
+		);
+		// Parent + both children were checked; the inserted row's state is
+		// serialization-dependent and not asserted.
+		expect(Number(checkedRows.rows[0].n)).toBeGreaterThanOrEqual(3);
+		await query(`DELETE FROM packing_lists WHERE id = $1`, [list]);
 	});
 
 	it('deleteItem still refuses cross-trip ids and reports false', async () => {

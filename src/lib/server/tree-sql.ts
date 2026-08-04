@@ -45,6 +45,18 @@ async function applyChanges(
 	changes: Change[]
 ): Promise<void> {
 	assertTable(table);
+	if (changes.length === 0) return;
+	// Trigger-free prelock of every row this op will touch, in id order,
+	// BEFORE the first UPDATE fires a 0010 activity trigger (which locks the
+	// trips row). Without it the first UPDATE holds trips while later
+	// UPDATEs seek other item rows — a trips → items edge that deadlocks
+	// against writers following the canonical item(s) → … → trips order
+	// (peer CODEX reproduced move-up vs deleteItem, td-36b55b round 1).
+	const ids = [...new Set(changes.map((c) => c.id))].sort((x, y) => x - y);
+	await client.query(
+		`SELECT id FROM ${table} WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE`,
+		[ids]
+	);
 	for (const c of changes) {
 		await client.query(
 			`UPDATE ${table} SET parent_id = $2, sort_order = $3, updated_at = NOW() WHERE id = $1`,

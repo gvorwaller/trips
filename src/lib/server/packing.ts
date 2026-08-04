@@ -159,6 +159,16 @@ export async function createPackingItemAt(
 		);
 		if (ref.rowCount === 0) return null;
 		const parentId = ref.rows[0].parent_id;
+		// Canonical lock order (td-36b55b): lock every EXISTING row in the
+		// list, trigger-free and id-ordered, BEFORE the INSERT below fires
+		// the 0010 trigger (which takes the trips row) — the restructure
+		// after the INSERT seeks sibling rows, and holding trips first
+		// deadlocks against tree movers that prelock siblings then seek
+		// trips (peer CODEX reproduced the exact schedule).
+		await client.query(
+			`SELECT id FROM packing_items WHERE list_id = $1 ORDER BY id FOR UPDATE`,
+			[listId]
+		);
 		const sort = await nextSortOrder(client, 'packing_items', listId, parentId);
 		const ins = await client.query<{ id: number }>(
 			`INSERT INTO packing_items (list_id, parent_id, sort_order, name, quantity, category, notes)
@@ -251,25 +261,46 @@ export async function setPackingItemChecked(
 	itemId: number,
 	checked: boolean
 ): Promise<boolean> {
-	const res = await query(
-		`WITH RECURSIVE root AS (
-		     SELECT pi.id, pi.list_id
-		       FROM packing_items pi
-		       JOIN packing_lists pl ON pl.id = pi.list_id
-		       JOIN trips t ON t.id = pl.trip_id
-		      WHERE pi.id = $1 AND t.owner_id = $2
-		 ),
-		 subtree AS (
-		     SELECT id, list_id FROM root
-		     UNION ALL
-		     SELECT c.id, c.list_id
-		       FROM packing_items c
-		       JOIN subtree s ON c.parent_id = s.id AND c.list_id = s.list_id
-		 )
-		 UPDATE packing_items
-		    SET checked = $3, updated_at = NOW()
-		  WHERE id IN (SELECT id FROM subtree)`,
-		[itemId, ownerId, checked]
-	);
-	return (res.rowCount ?? 0) > 0;
+	return withTransaction(async (client) => {
+		const root = await client.query<{ list_id: number }>(
+			`SELECT pi.list_id
+			   FROM packing_items pi
+			   JOIN packing_lists pl ON pl.id = pi.list_id
+			   JOIN trips t ON t.id = pl.trip_id
+			  WHERE pi.id = $1 AND t.owner_id = $2`,
+			[itemId, ownerId]
+		);
+		if ((root.rowCount ?? 0) === 0) return false;
+		// Canonical lock order (td-36b55b): a single multi-row UPDATE visits
+		// rows in PostgreSQL's unspecified order, so it can hold a later row
+		// plus trips (0010 trigger) while seeking an earlier row a canonical
+		// writer holds. Lock the whole list, trigger-free and id-ordered,
+		// first — that also freezes subtree membership (a child INSERT needs
+		// an FK key-share on its locked parent). Lists are small.
+		await client.query(
+			`SELECT id FROM packing_items WHERE list_id = $1 ORDER BY id FOR UPDATE`,
+			[root.rows[0].list_id]
+		);
+		const res = await client.query(
+			`WITH RECURSIVE root AS (
+			     SELECT pi.id, pi.list_id
+			       FROM packing_items pi
+			       JOIN packing_lists pl ON pl.id = pi.list_id
+			       JOIN trips t ON t.id = pl.trip_id
+			      WHERE pi.id = $1 AND t.owner_id = $2
+			 ),
+			 subtree AS (
+			     SELECT id, list_id FROM root
+			     UNION ALL
+			     SELECT c.id, c.list_id
+			       FROM packing_items c
+			       JOIN subtree s ON c.parent_id = s.id AND c.list_id = s.list_id
+			 )
+			 UPDATE packing_items
+			    SET checked = $3, updated_at = NOW()
+			  WHERE id IN (SELECT id FROM subtree)`,
+			[itemId, ownerId, checked]
+		);
+		return (res.rowCount ?? 0) > 0;
+	});
 }

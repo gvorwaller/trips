@@ -178,9 +178,18 @@ export async function setItemDates(
 	ids: number[],
 	date: string | null
 ): Promise<number[]> {
-	const wanted = [...new Set(ids)];
+	const wanted = [...new Set(ids)].sort((x, y) => x - y);
 	if (wanted.length === 0) return [];
 	return withTransaction(async (client) => {
+		// Canonical lock order (td-36b55b): a single multi-row UPDATE visits
+		// rows in unspecified order, so it can hold a later row plus trips
+		// (0010 trigger) while seeking an earlier row a canonical writer
+		// holds. Trigger-free id-ordered prelock first.
+		await client.query(
+			`SELECT id FROM itinerary_items WHERE id = ANY($1::int[]) AND trip_id = $2
+			  ORDER BY id FOR UPDATE`,
+			[wanted, tripId]
+		);
 		const res = await client.query<{ id: number }>(
 			`UPDATE itinerary_items SET date = $3, updated_at = NOW()
 			  WHERE id = ANY($1::int[]) AND trip_id = $2 AND item_type = 'place'
@@ -203,25 +212,45 @@ export async function deleteItem(tripId: number, id: number): Promise<boolean> {
 		// UPDATE. A bare DELETE acquired the trips row first (0010 trigger)
 		// and only then swept the linked day-plan stops through the FK's
 		// ON DELETE SET NULL — a trips → stops edge that deadlocks against
-		// visited writers holding stops while seeking trips. So: lock the
-		// whole subtree's items (children cascade too), then every linked
-		// stop, and only then delete.
-		const subtree = await client.query<{ id: number }>(
-			`SELECT id FROM itinerary_items
-			  WHERE id IN (
-					WITH RECURSIVE sub AS (
-						SELECT id FROM itinerary_items WHERE id = $1 AND trip_id = $2
-						UNION ALL
-						SELECT i.id FROM itinerary_items i JOIN sub s ON i.parent_id = s.id
-					)
-					SELECT id FROM sub
-				)
-			  ORDER BY id
-			  FOR UPDATE`,
-			[id, tripId]
+		// visited writers holding stops while seeking trips.
+		//
+		// MEMBERSHIP is the subtle half (peer CODEX reproduced it): under
+		// READ COMMITTED a single recursive SELECT … FOR UPDATE is not a
+		// stable subtree — a child committed while the statement waits on its
+		// parent's lock is invisible to the statement's snapshot, so it (and
+		// its stops) escape the prelock and reopen the cycle at DELETE time.
+		// So: lock every EXISTING item in the trip (id order), then
+		// re-enumerate the subtree in fresh statements and lock any ids the
+		// earlier passes missed, to a fixpoint. Each pass locks the parents
+		// one level deeper, and an INSERT needs an FK key-share on its locked
+		// parent, so the loop converges with the subtree frozen.
+		await client.query(
+			`SELECT id FROM itinerary_items WHERE trip_id = $1 ORDER BY id FOR UPDATE`,
+			[tripId]
 		);
-		if (subtree.rows.length === 0) return false;
-		const itemIds = subtree.rows.map((r) => r.id);
+		const locked = new Set<number>();
+		let itemIds: number[] = [];
+		for (;;) {
+			const subtree = await client.query<{ id: number }>(
+				`WITH RECURSIVE sub AS (
+					SELECT id FROM itinerary_items WHERE id = $1 AND trip_id = $2
+					UNION ALL
+					SELECT i.id FROM itinerary_items i JOIN sub s ON i.parent_id = s.id
+				)
+				SELECT id FROM sub ORDER BY id`,
+				[id, tripId]
+			);
+			if (subtree.rows.length === 0) return false;
+			itemIds = subtree.rows.map((r) => r.id);
+			const missing = itemIds.filter((itemId) => !locked.has(itemId));
+			if (missing.length === 0 && locked.size > 0) break;
+			await client.query(
+				`SELECT id FROM itinerary_items WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE`,
+				[itemIds]
+			);
+			for (const itemId of itemIds) locked.add(itemId);
+			if (missing.length === 0) break;
+		}
 		await client.query(
 			`SELECT id FROM day_plan_stops
 			  WHERE itinerary_item_id = ANY($1::int[])
