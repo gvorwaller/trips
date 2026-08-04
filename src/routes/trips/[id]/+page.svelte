@@ -1004,11 +1004,7 @@
 		stops: DayPlanStop[],
 		anchor: PlanAnchor | null
 	): Promise<void> {
-		const { legs, returnLeg } = await computeLegDistances(
-			MAPS_API_KEY,
-			savedRouteStops(stops),
-			anchor
-		);
+		const { legs, returnLeg } = await computeLegDistances(savedRouteStops(stops), anchor);
 		const fd = new FormData();
 		fd.set('plan_id', String(planId));
 		fd.set('legs', JSON.stringify(legs));
@@ -1023,10 +1019,8 @@
 		stops = stopsForPlan(planId),
 		anchor: PlanAnchor | null = null
 	) {
-		if (!MAPS_API_KEY) {
-			setRouteStatus(planId, 'Google Maps key is not configured.');
-			return;
-		}
+		// No MAPS_API_KEY gate: routing runs server-side (td-b580a8) and the
+		// display key says nothing about it. Server errors surface below.
 		dayPlanRouteBusy = planId;
 		try {
 			await persistDriving(planId, stops, anchor);
@@ -1077,16 +1071,16 @@
 		dayPlanRouteBusy = planId;
 		try {
 			let orderedIds: number[] | undefined;
-			if (MAPS_API_KEY) {
-				try {
-					const optimized = await optimizeDrivingRoute(MAPS_API_KEY, {
-						anchor,
-						stops: savedRouteStops(stops)
-					});
-					orderedIds = optimized.orderedIds;
-				} catch {
-					// Fall through to the server-side nearest-neighbor fallback.
-				}
+			let routed = false;
+			try {
+				const optimized = await optimizeDrivingRoute({
+					anchor,
+					stops: savedRouteStops(stops)
+				});
+				orderedIds = optimized.orderedIds;
+				routed = true;
+			} catch {
+				// Fall through to the server-side nearest-neighbor fallback.
 			}
 
 			if (!orderedIds) {
@@ -1107,10 +1101,10 @@
 			}
 
 			const orderedStops = orderSavedStops(stops, orderedIds);
-			if (MAPS_API_KEY && allStopsLocated(savedRouteStops(orderedStops))) {
+			if (routed && allStopsLocated(savedRouteStops(orderedStops))) {
 				await persistDriving(planId, orderedStops, anchor);
 				setRouteStatus(planId, 'Route optimized and distances updated.');
-			} else if (MAPS_API_KEY) {
+			} else if (routed) {
 				setRouteStatus(
 					planId,
 					'Route optimized. Add coordinates to every stop to calculate distances.'
@@ -1137,12 +1131,12 @@
 		dayPlanRouteBusy = 'builder';
 		try {
 			let orderedIds: number[];
-			if (MAPS_API_KEY) {
-				const optimized = await optimizeDrivingRoute(MAPS_API_KEY, { anchor, stops: routeStops });
+			try {
+				const optimized = await optimizeDrivingRoute({ anchor, stops: routeStops });
 				orderedIds = optimized.orderedIds;
 				builderRouteKm = optimized.totalKm;
 				builderRouteMin = optimized.totalMin;
-			} else {
+			} catch {
 				orderedIds = straightLineOptimize(routeStops, anchor);
 				builderRouteKm = routeDistanceKm(
 					[anchorPlace(anchor), ...orderBuilderStops(orderedIds).map(stopPlace)].filter(

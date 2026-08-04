@@ -1,5 +1,4 @@
 import { haversineKm } from '$lib/geo';
-import { loadGoogleMaps } from '$lib/google-maps';
 
 export interface RouteStop {
 	id: number;
@@ -70,43 +69,48 @@ function requireAllLocated(stops: RouteStop[]): Array<RouteStop & { lat: number;
 	return located;
 }
 
-async function directionsService(apiKey: string) {
-	const libs = await loadGoogleMaps(apiKey, ['routes']);
-	/* eslint-disable @typescript-eslint/no-explicit-any */
-	const routes = libs.routes as any;
-	return new routes.DirectionsService();
-	/* eslint-enable @typescript-eslint/no-explicit-any */
-}
-
-function totals(route: {
-	legs?: Array<{ distance?: { value?: number }; duration?: { value?: number } }>;
-}) {
-	let meters = 0;
-	let seconds = 0;
-	for (const leg of route.legs ?? []) {
-		meters += leg.distance?.value ?? 0;
-		seconds += leg.duration?.value ?? 0;
+/**
+ * Transport to the server's Routes API v2 wrapper (td-b580a8). The browser
+ * DirectionsService these helpers used is deprecated; all Google calls now
+ * happen server-side (/api/route/directions), where results are cached and
+ * the key never leaves the server. The validation kept below is a fast local
+ * pre-check for instant error messages — the server re-validates everything
+ * and is authoritative.
+ */
+async function requestDirections<T>(body: {
+	mode: 'legs' | 'optimize';
+	stops: RouteStop[];
+	anchor: AnchorPoint | null;
+}): Promise<T> {
+	const res = await fetch('/api/route/directions', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(body)
+	});
+	let data: unknown = null;
+	try {
+		data = await res.json();
+	} catch {
+		/* fall through to the status check */
 	}
-	return { km: meters / 1000, min: Math.round(seconds / 60) };
+	if (!res.ok) {
+		const message = (data as { message?: string; error?: string } | null) ?? {};
+		throw new Error(message.message ?? message.error ?? 'Directions service failed.');
+	}
+	return data as T;
 }
 
 /**
  * Compute driving distance/duration for each leg in the current stop order.
  * Returned stopId is the destination stop for the leg from the previous stop.
  *
- * An anchored plan is a CLOSED LOOP: anchor -> every stop -> back to the anchor.
- * Google returns stops.length + 1 legs for that shape; legs 0..n-1 belong to
- * stops 0..n-1, and the final leg is the drive home, returned separately as
- * returnLeg because it has no destination stop to attach to. This matches
- * optimizeDrivingRoute, which has always modelled the anchored day as a loop —
- * the disagreement between the two was td-bf2909, and it made every anchored
- * plan's saved total short by the drive home.
- *
- * An unanchored plan stays an open path (first stop -> last stop, n-1 legs) and
- * gets returnLeg: null. There is no base to return to.
+ * An anchored plan is a CLOSED LOOP: anchor -> every stop -> back to the
+ * anchor; the final leg is the drive home, returned separately as returnLeg
+ * (td-bf2909). An unanchored plan stays an open path with returnLeg: null.
+ * The loop semantics, leg-count validation and attribution all live
+ * server-side in $server/route-directions.
  */
 export async function computeLegDistances(
-	apiKey: string,
 	stops: RouteStop[],
 	anchor: AnchorPoint | null = null
 ): Promise<DrivingLegs> {
@@ -117,65 +121,19 @@ export async function computeLegDistances(
 		);
 	}
 	assertNoDuplicateRoutePoints(anchor ? [anchor, ...located] : located);
-
-	const service = await directionsService(apiKey);
-	const origin = anchor ?? located[0];
-	const destination = anchor ?? located[located.length - 1];
-	const waypointSource = anchor ? located : located.slice(1, -1);
-	const waypoints = waypointSource.map((s) => ({
-		location: { lat: s.lat, lng: s.lon },
-		stopover: true
-	}));
-
-	const result = await service.route({
-		origin: { lat: origin.lat, lng: origin.lon },
-		destination: { lat: destination.lat, lng: destination.lon },
-		waypoints,
-		optimizeWaypoints: false,
-		travelMode: 'DRIVING'
-	});
-
-	const route = result?.routes?.[0];
-	if (!route) throw new Error('No drivable route found.');
-
-	// Reject partial responses before attributing anything. Without this, a short
-	// leg array would slide the mapping and silently label some intermediate leg
-	// as the drive home — a wrong number wearing the label of the fix.
-	const rawLegs: Array<{ distance?: { value?: number }; duration?: { value?: number } }> =
-		route.legs ?? [];
-	const expected = anchor ? located.length + 1 : located.length - 1;
-	if (rawLegs.length !== expected) {
-		throw new Error(
-			`Directions returned ${rawLegs.length} legs for ${located.length} stops; expected ${expected}.`
-		);
-	}
-
-	const toLeg = (leg: { distance?: { value?: number }; duration?: { value?: number } }) => ({
-		km: (leg.distance?.value ?? 0) / 1000,
-		min: Math.round((leg.duration?.value ?? 0) / 60)
-	});
-
-	// Anchored: leg i ends at stop i. Unanchored: leg i ends at stop i + 1.
-	const stopLegs = anchor ? rawLegs.slice(0, -1) : rawLegs;
-	const legs: DrivingLeg[] = stopLegs.map((leg, i) => ({
-		stopId: located[anchor ? i : i + 1].id,
-		...toLeg(leg)
-	}));
-
-	return { legs, returnLeg: anchor ? toLeg(rawLegs[rawLegs.length - 1]) : null };
+	return requestDirections<DrivingLegs>({ mode: 'legs', stops, anchor });
 }
 
 /**
- * Optimize stop order with Google Directions. An anchor acts as a lodging/base
- * loop. Without an anchor, the first located stop is treated as the fixed base.
- * Stops without coordinates are appended in their original order.
+ * Optimize stop order. An anchor acts as a lodging/base loop; without one the
+ * first located stop is the fixed base. Stops without coordinates are
+ * appended in their original order (handled server-side).
  */
-export async function optimizeDrivingRoute(
-	apiKey: string,
-	opts: { anchor: AnchorPoint | null; stops: RouteStop[] }
-): Promise<OptimizeResult> {
+export async function optimizeDrivingRoute(opts: {
+	anchor: AnchorPoint | null;
+	stops: RouteStop[];
+}): Promise<OptimizeResult> {
 	const located = locatedStops(opts.stops);
-	const unlocated = missingStops(opts.stops);
 	const minLocated = opts.anchor ? 2 : 3;
 	if (located.length < minLocated) {
 		throw new Error(
@@ -188,34 +146,11 @@ export async function optimizeDrivingRoute(
 		opts.anchor ? [opts.anchor, ...located] : located,
 		'Remove duplicate stops before optimizing the route.'
 	);
-
-	const service = await directionsService(apiKey);
-	const fixedAnchor = opts.anchor ?? { lat: located[0].lat, lon: located[0].lon };
-	const keptPrefix = opts.anchor ? [] : [located[0]];
-	const waypointStops = opts.anchor ? located : located.slice(1);
-
-	const result = await service.route({
-		origin: { lat: fixedAnchor.lat, lng: fixedAnchor.lon },
-		destination: { lat: fixedAnchor.lat, lng: fixedAnchor.lon },
-		waypoints: waypointStops.map((s) => ({
-			location: { lat: s.lat, lng: s.lon },
-			stopover: true
-		})),
-		optimizeWaypoints: true,
-		travelMode: 'DRIVING'
+	return requestDirections<OptimizeResult>({
+		mode: 'optimize',
+		stops: opts.stops,
+		anchor: opts.anchor
 	});
-
-	const route = result?.routes?.[0];
-	if (!route) throw new Error('No drivable route found.');
-	const order: number[] = route.waypoint_order ?? waypointStops.map((_, i) => i);
-	const orderedWaypoints = order.map((i) => waypointStops[i]);
-	const t = totals(route);
-
-	return {
-		orderedIds: [...keptPrefix, ...orderedWaypoints, ...unlocated].map((s) => s.id),
-		totalKm: t.km,
-		totalMin: t.min
-	};
 }
 
 export function straightLineOptimize(stops: RouteStop[], anchor: AnchorPoint | null): number[] {
