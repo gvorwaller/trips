@@ -20,6 +20,7 @@
 		"test:db:reset": "./scripts/test-db-reset.sh",
 		"test:db:migrate": "./scripts/test-db-migrate.sh",
 		"test:safari:place-workspace": "node --env-file=.env.test scripts/safari-smoke-place-workspace.mjs",
+		"test:safari:tap-targets": "node --env-file=.env.test scripts/safari-audit-tap-targets.mjs",
 		"format": "prettier --write .",
 		"lint": "prettier --check ."
 	},

@@ -88,6 +88,8 @@ select {
 	display: flex;
 	align-items: center;
 	gap: 8px;
+	min-height: 44px;
+	min-width: 44px;
 }
 .top-nav .links {
 	display: none;
@@ -318,6 +320,11 @@ select {
 	flex: 1;
 	min-width: 0;
 }
+.obs .name a {
+	display: inline-flex;
+	align-items: center;
+	min-height: 44px;
+}
 .obs .name {
 	font-weight: 700;
 }
@@ -386,6 +393,22 @@ select {
 }
 
 /* ── Forms / filters ────────────────────────────────────── */
+/* td-3b3f5e: every native control is a tap target. 44px minimum and 16px
+   input font (cs.md) as the app-wide floor; checkboxes/radios stay glyph-
+   sized because their real target is a wrapping label. The print block
+   resets what it needs. */
+select,
+textarea,
+input:not([type='checkbox']):not([type='radio']):not([type='hidden']) {
+	min-height: 44px;
+	font-size: 16px;
+}
+summary {
+	min-height: 44px;
+	padding-block: 8px;
+	cursor: pointer;
+}
+
 .filters {
 	display: flex;
 	flex-wrap: wrap;
@@ -782,6 +805,15 @@ select {
 	li,
 	.obs {
 		break-inside: avoid;
+	}
+	summary {
+		min-height: 0 !important;
+		padding-block: 0 !important;
+	}
+	select,
+	textarea,
+	input {
+		min-height: 0 !important;
 	}
 	/* Show pasted-text documents in full even if their <details> is collapsed. */
 	.textdoc-body {

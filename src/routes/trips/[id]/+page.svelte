@@ -1752,6 +1752,11 @@
 			· <span class="badge need">archived</span>{/if}
 	</div>
 	<button type="button" class="btn small print-btn" onclick={printSheet}>🖨 Print</button>
+	<a
+		class="btn small"
+		href="/trips/{data.trip.id}/export?format=txt&units={distanceUnit}"
+		title="plain text to paste into Messages">Share text</a
+	>
 </div>
 
 {#if data.trip.notes}
@@ -3463,13 +3468,16 @@
 										{:else}
 											<span class="caret-spacer" aria-hidden="true"></span>
 										{/if}
-										<input
-											type="checkbox"
-											class="chk"
-											checked={packChecked(packStats.get(node.id))}
-											indeterminate={packIndeterminate(packStats.get(node.id))}
-											onchange={(e) => toggleCheck(node.id, e.currentTarget.checked)}
-										/>
+										<label class="chk-hit">
+											<input
+												type="checkbox"
+												class="chk"
+												checked={packChecked(packStats.get(node.id))}
+												indeterminate={packIndeterminate(packStats.get(node.id))}
+												aria-label="packed"
+												onchange={(e) => toggleCheck(node.id, e.currentTarget.checked)}
+											/>
+										</label>
 										<span class="grow" class:done={packChecked(packStats.get(node.id))}>
 											{node.name}{#if node.quantity > 1}<span class="muted">
 													×{node.quantity}</span
@@ -4448,6 +4456,9 @@
 	.back {
 		text-decoration: none;
 		font-size: 0.85rem;
+		display: inline-flex;
+		align-items: center;
+		min-height: 44px;
 	}
 	.outline {
 		list-style: none;
@@ -4467,8 +4478,11 @@
 	/* Collapse/expand caret on foldable rows; spacer keeps leaf rows aligned. */
 	.caret {
 		flex-shrink: 0;
-		width: 24px;
-		height: 24px;
+		/* 44x44 hit target (cs.md); negative margins keep the dense row's
+		   flow at ~28px and the right spill inside the 8px flex gap, so the
+		   expanded box cannot overlap the neighbouring checkbox target. */
+		width: 44px;
+		height: 44px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -4547,7 +4561,8 @@
 	.linkbtn {
 		background: none;
 		border: none;
-		padding: 0;
+		/* 44px-tall in-flow hit box. */
+		padding: 12px 4px;
 		font-size: inherit;
 		color: var(--link);
 		cursor: pointer;
@@ -4607,18 +4622,21 @@
 	.chips {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 6px;
+		/* Row gap must absorb the chip-links' 4px vertical hit-box spill so
+		   expanded targets touch but never overlap. */
+		gap: 8px 6px;
 		margin-top: 4px;
 	}
 	.chip-link {
 		font-size: 0.78rem;
-		padding: 3px 9px;
+		/* 44px in-flow hit target. */
+		padding: 10px 9px;
 		border: 0;
 		border-radius: 999px;
 		background: var(--accent-soft);
 		color: var(--accent);
 		text-decoration: none;
-		min-height: 28px;
+		min-height: 44px;
 		display: inline-flex;
 		align-items: center;
 	}
@@ -4634,13 +4652,15 @@
 	.chip-action {
 		font: inherit;
 		font-size: 0.78rem;
-		padding: 3px 9px;
+		padding: 10px 9px;
 		border: 1px solid var(--border);
 		border-radius: 999px;
 		background: var(--card);
 		color: var(--link);
 		text-decoration: none;
-		min-height: 28px;
+		/* 44 as the ONLY min-height — a later duplicate 28px in this same
+		   rule silently won over an earlier 44 (last declaration wins). */
+		min-height: 44px;
 		display: inline-flex;
 		align-items: center;
 		cursor: pointer;
@@ -4668,8 +4688,11 @@
 		border: 1px solid var(--border);
 		background: var(--card);
 		border-radius: 6px;
-		min-width: 30px;
-		min-height: 32px;
+		/* Dense-row controls meet 44 at THIS specificity — a lower-specificity
+		   .del rule loses to these selectors (peer CODEX, td-3b3f5e round 1).
+		   Vertical negative margin keeps row heights. */
+		min-width: 44px;
+		min-height: 44px;
 		color: var(--muted);
 	}
 	.row-controls button.del {
@@ -4684,7 +4707,7 @@
 		border: 1px solid var(--border);
 		background: var(--card);
 		border-radius: 6px;
-		min-width: 30px;
+		min-width: 44px;
 		min-height: 32px;
 		color: var(--muted);
 		font-size: 0.8rem;
@@ -4693,6 +4716,11 @@
 		margin: 2px 0;
 	}
 	.drag-handle {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 44px;
+		min-height: 44px;
 		cursor: grab;
 		color: var(--muted);
 		user-select: none;
@@ -4708,6 +4736,11 @@
 	   the ↑/↓, indent/outdent, and insert buttons (td-4f7d9b follow-up). */
 	@media (hover: none) and (pointer: coarse) {
 		.drag-handle {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 44px;
+		min-height: 44px;
 			display: none;
 		}
 	}
@@ -4923,6 +4956,18 @@
 		border: none;
 		color: var(--danger);
 		font-size: 0.8rem;
+		/* Destructive controls were the worst offenders (the plan delete X
+		   measured 11x21.6). Dense rows: 44 via negative margins. */
+		min-width: 44px;
+		min-height: 44px;
+		padding: 10px 6px;
+	}
+	/* In the plan-card actions row the delete is a standalone control ->
+	   48px (cs.md), and there is room to keep it in flow. */
+	.dayplan-actions .del {
+		min-width: 48px;
+		min-height: 48px;
+		margin: 0;
 	}
 	.templates {
 		margin-top: 12px;
@@ -4943,6 +4988,7 @@
 		gap: 10px;
 	}
 	.section-toggle {
+		min-height: 48px;
 		display: flex;
 		align-items: center;
 		gap: 6px;
@@ -4962,7 +5008,7 @@
 	}
 	.places-schedule-btn {
 		flex-shrink: 0;
-		min-height: 40px;
+		min-height: 48px;
 		text-decoration: none;
 	}
 	.section-caret {
@@ -5000,8 +5046,8 @@
 		background: var(--card);
 	}
 	.unit-toggle button {
-		min-width: 42px;
-		min-height: 36px;
+		min-width: 44px;
+		min-height: 44px;
 		border: 0;
 		border-radius: 0;
 		padding: 6px 10px;
@@ -5179,10 +5225,13 @@
 	}
 	.dayplan-visited {
 		display: flex;
-		align-items: flex-start;
+		align-items: center;
 		gap: 8px;
 		flex: 1;
 		min-width: 0;
+		/* The label is the real target (the input is a 22px glyph). */
+		min-height: 44px;
+		cursor: pointer;
 	}
 	.dayplan-visited input {
 		width: 22px;
@@ -5203,8 +5252,10 @@
 		border: 1px solid var(--border);
 		background: var(--card);
 		border-radius: 6px;
-		min-width: 30px;
-		min-height: 32px;
+		/* In-flow 44 (td-3b3f5e): the audit proved negative-margin tricks
+		   overlap neighbouring targets, so density yields to the rule. */
+		min-width: 44px;
+		min-height: 44px;
 		color: var(--muted);
 	}
 	.dayplan-stop-links button:disabled,
@@ -5248,11 +5299,29 @@
 		margin-top: 8px;
 		align-items: center;
 	}
+	/* Scoped baseline: the app.css global `select` rule loses to any
+	   scoped `select.s-*` selector, so the floor must exist at component
+	   scope too (audit round: type/reservation/expense selects at 26px). */
+	select,
+	textarea {
+		min-height: 44px;
+		font-size: 16px;
+	}
+	/* Safari-specific: WebKit renders native selects at their intrinsic
+	   ~26px despite a min-height floor (Chromium honors it — verified by
+	   cross-engine computed-style probes in the audit round). An explicit
+	   height is what Safari respects. Textareas keep min-height only. */
+	select {
+		height: 44px;
+	}
 	.route-tools select {
 		flex: 1 1 180px;
 		/* Same native-select shrink problem as .add-row select above. */
 		min-width: 0;
 		max-width: min(320px, 100%);
+		/* Measured 298x25.5 — selects are controls too. 16px per cs.md. */
+		min-height: 44px;
+		font-size: 16px;
 	}
 	.route-status {
 		color: var(--muted);
@@ -5579,9 +5648,10 @@
 		border: 1px solid var(--border);
 		background: var(--card);
 		border-radius: 6px;
-		min-width: 30px;
-		min-height: 32px;
+		min-width: 44px;
+		min-height: 44px;
 		color: var(--muted);
+		margin: -6px 0;
 	}
 	.res-controls button.del {
 		color: var(--danger);
@@ -5671,9 +5741,10 @@
 		border: 1px solid var(--border);
 		background: var(--card);
 		border-radius: 6px;
-		min-width: 30px;
-		min-height: 32px;
+		min-width: 44px;
+		min-height: 44px;
 		color: var(--muted);
+		margin: -6px 0;
 	}
 	.exp-controls button.del {
 		color: var(--danger);
