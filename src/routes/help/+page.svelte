@@ -13,6 +13,7 @@
 		{ id: 'place-workspace', icon: '🗺️', title: 'The place workspace & Ask AI' },
 		{ id: 'day-plans', icon: '🚗', title: 'Day Plans' },
 		{ id: 'packing', icon: '🎒', title: 'Packing & templates' },
+		{ id: 'sharing', icon: '📤', title: 'Sharing & export' },
 		{ id: 'records', icon: '🧾', title: 'Reservations, Documents & Expenses' },
 		{ id: 'printing', icon: '🖨️', title: 'Printing' },
 		{ id: 'accounts', icon: '👥', title: 'Accounts & roles' }
@@ -113,9 +114,15 @@
 						state reset, so a repeat trip starts fresh.
 					</p>
 					<p>
+						When a trip is over, <strong>Archive</strong> it (next to Edit and Duplicate). Archived
+						trips move out of the main list into a collapsed <strong>Archived</strong> section, but stay
+						fully readable, editable, and searchable — they're for future reference, not deleted.
+						<strong>Unarchive</strong> brings one back any time.
+					</p>
+					<p>
 						The trips list shows each trip's dates and when it was last touched. Use
 						<strong>Search</strong> in the top bar to find anything — trips, places, packing items, reservations
-						— by name.
+						— by name (results from archived trips carry an <em>archived</em> badge).
 					</p>
 				{:else if s.id === 'places'}
 					<p>The <strong>Add</strong> box has a type chooser. Each type behaves differently:</p>
@@ -156,7 +163,26 @@
 							<strong>Import from photo</strong> — drop or paste a screenshot (e.g. of a list or map)
 							and the app extracts the places it can read.
 						</li>
+						<li>
+							<strong>Import from Birds</strong> — pull the stops from a birding trip in the Birds
+							app. After fetching, a <strong>trip dropdown</strong> lets you import one trip's places
+							at a time instead of unchecking a long combined list.
+						</li>
 					</ul>
+					<h4>Checking places off</h4>
+					<p>
+						Every place row has a <strong>visited checkbox</strong> — tick it when you've been. The
+						Places heading shows a running <em>“X / Y visited”</em> count, and checking a place
+						anywhere (the tree, its workspace page, or a day-plan stop) updates every copy — they can
+						never disagree.
+					</p>
+					<h4>Dates on places</h4>
+					<p>
+						A place can carry an optional <strong>date</strong> — set it when adding (there's a date
+						field in the Add box and in Paste many), or later from the row's edit form. Dated places
+						appear on the trip's <strong>📅 Schedule</strong> page (button next to the Places heading),
+						a day-by-day view of everything you've pinned to a date.
+					</p>
 					<h4>Folding</h4>
 					<p>
 						Any row with children shows a <strong>▾ / ▸</strong> caret — tap to fold that branch;
@@ -198,15 +224,29 @@
 						itinerary — without moving or duplicating them. Build one from scratch in the Day Plans
 						section, or tap <strong>Day plan</strong> on a day/section to start from its places.
 					</p>
+					<p>
+						Saved plans start <strong>collapsed</strong>, so the section reads as an index of your days
+						— each folded card still shows its date, weather, and driving total. Tap
+						<strong>▸ Stops</strong> to open one; the app remembers which plans you keep open, per trip.
+						The <strong>mi / km</strong> toggle in the section header switches units everywhere,
+						including exports.
+					</p>
 					<p>Each saved plan keeps ordered stops, per-stop notes, and visited checkboxes, plus:</p>
 					<ul>
 						<li>
-							<strong>Anchor</strong> — pick your lodging (or any place) as the start/end point for routing.
+							<strong>Anchor</strong> — pick your lodging (or any place) as the start/end point for
+							routing. An anchored day is a <em>closed loop</em>: the total includes the drive home,
+							shown as its own row after the last stop.
 						</li>
 						<li>
-							<strong>Calculate distances</strong> — driving time and miles for each leg via Google Directions.
+							<strong>Calculate distances</strong> — driving time and miles for each leg, computed
+							server-side through Google's routing.
 						</li>
-						<li><strong>Optimize order</strong> — sorts stops into the shortest driving route.</li>
+						<li><strong>Optimize order</strong> — sorts stops into the shortest driving loop.</li>
+						<li>
+							<strong>Duplicate</strong> — copy a plan (visited flags reset) to try a different order
+							or reuse a day.
+						</li>
 						<li>
 							<strong>Open directions</strong> — the full multi-stop route in Google Maps, with
 							individual <em>Leg</em> links per segment.
@@ -262,6 +302,39 @@
 						statement or an uploaded screenshot for review — deselect the non-trip lines before
 						saving. An expense can link to an uploaded receipt via
 						<strong>Link document</strong>.
+					</p>
+				{:else if s.id === 'sharing'}
+					<p>
+						Everything here is built for the way trips actually get shared: pasted into Messages from
+						a phone.
+					</p>
+					<h4>Share a whole trip</h4>
+					<p>
+						<strong>Share text</strong> at the top of the trip page opens a plain-text version of the
+						trip — places (with their map links), day plans, reservations, and packing lists — ready to
+						select-all and paste. Add <code>?format=md</code> for a Markdown download instead. Expenses
+						and attached files are deliberately left out (the export says so at the bottom), so a
+						shared sheet never leaks costs or documents.
+					</p>
+					<h4>Share one day</h4>
+					<p>Each day-plan card has three share controls:</p>
+					<ul>
+						<li>
+							<strong>Share text</strong> — the day as plain text with tappable Apple/Google links per
+							stop, the drive legs, and (when the route fits in one link) a whole-route Google Maps URL.
+						</li>
+						<li>
+							<strong>🖨 Print / PDF</strong> — a clean print page for the day; use the browser's
+							“Save as PDF” for a file with clickable links.
+						</li>
+						<li>
+							<strong>Calendar</strong> — download an <code>.ics</code> that adds the day as an
+							all-day event with the stops in its description (shown only when the plan has a date).
+						</li>
+					</ul>
+					<p>
+						Viewers can use every share control too — sharing is reading. AI visit notes stay out of
+						exports unless you add <code>&amp;ai=1</code> to the link; they're long.
 					</p>
 				{:else if s.id === 'printing'}
 					<p>

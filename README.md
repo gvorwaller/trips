@@ -8,23 +8,27 @@ A private, mobile-first trip planning web app for one owner and one read-only vi
 - **PostgreSQL** via `pg` (node-postgres) — no ORM
 - **DO Spaces** (S3-compatible) for attachment storage
 - **Anthropic API** for itinerary, reservation, and expense extraction
-- **Google Maps** for place search, geocoding, and map pins
+- **Google Maps** for place search, geocoding, and map pins; **Routes API v2** (server-side) for day-plan driving legs and route optimization
 - **argon2** password hashing + session cookies
 - Component-scoped CSS (no utility frameworks)
 - `@sveltejs/adapter-node` deployed with PM2
 
 ## Features
 
-- **Itinerary** — nestable outliner with item types: place, day, section, note. Places get map pins and one-tap Google/Apple/directions links. Multi-stop day routes. Freeform text, Maps URL, photo, and Birds trip-stop imports extract candidate places/notes for review before saving.
+- **Itinerary** — nestable outliner with item types: place, day, section, note. Places get map pins, one-tap Google/Apple/directions links, optional dates (with a per-trip Schedule page), and visited check-off with an "X / Y visited" roll-up. Multi-stop day routes. Freeform text, Maps URL, photo, and Birds imports (with a per-trip picker) extract candidate places/notes for review before saving.
+- **Day plans** — ordered driving routes through itinerary places, with a lodging anchor (closed-loop totals include the drive home), server-side leg distances and route optimization (cached; deterministic), per-stop weather, AI visit notes and nearby-stop suggestions, duplication, and per-plan export (text for Messages, print/PDF, `.ics` calendar event). Plan cards start collapsed and remember their fold state per trip.
 - **Packing** — nestable lists with check-off tracking, progress bars, templates, paste-many. Packing-only print.
 - **Reservations** — accommodation, flight, restaurant, transport, other. LLM extraction from pasted confirmations or uploaded documents. Manual reorder.
 - **Expenses** — manual entry or LLM extraction from bank statements / receipt screenshots. Category subtotals (lodging, food, transport, activities, other) and running total.
 - **Documents** — upload PDFs/images (up to 30 MB), in-app viewer, iOS-safe download. Optional display names. Linkable from reservations and expenses.
-- **Search** — global ILIKE across trips, places, packing, reservations, documents, expenses.
-- **Clone** — duplicate a trip with all nested data.
+- **Search** — global ILIKE across trips, places, packing, reservations, documents, expenses; hits from archived trips are badged.
+- **Clone** — duplicate a trip with all nested data (checked/visited state reset).
+- **Archive** — move a finished trip into a collapsed Archived section; still fully readable, editable, and searchable.
+- **Export** — whole-trip text/Markdown (places, day plans, reservations, packing; expenses and attachment contents deliberately omitted) plus the per-day-plan exports above.
 - **Collapsible sections** — per-trip state persisted in localStorage.
 - **Print** — full trip or packing-only, auto-expands collapsed sections.
-- **Two roles** — `owner` (full access) and `viewer` (read-only, can toggle packing checkboxes).
+- **Three roles** — `admin` (own data + user management), `user` (own data), `viewer` (read-only view of one account; can toggle packing checkboxes and visited flags, and use every export).
+- **Accessibility** — ≥44px tap targets app-wide (WCAG 2.5.5 AAA / Apple HIG), enforced by a Safari-driven audit script (`npm run test:safari:tap-targets`).
 
 ## Project structure
 
@@ -39,7 +43,7 @@ src/
     filevalidate.ts       Magic-byte file type detection
     google-maps.ts        Maps API lazy loader
   routes/
-    api/                  health, geocode, packing check endpoints
+    api/                  health, geocode, check-off, route-directions endpoints
     help/                 In-app help page
     login/                Auth
     search/               Global search

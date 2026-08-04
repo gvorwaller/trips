@@ -25,3 +25,5 @@ vite.config.js.timestamp-*
 # Claude Code: track shared commands, ignore per-machine state (matches siblings)
 .claude/settings.local.json
 .claude/worktrees/
+
+tmp/
