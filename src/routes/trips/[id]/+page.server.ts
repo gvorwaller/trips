@@ -1,6 +1,6 @@
 import { error, fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
-import { getTrip, deleteTrip } from '$server/trips';
+import { getTrip, deleteTrip, setTripArchived } from '$server/trips';
 import {
 	listItinerary,
 	createItem,
@@ -1498,5 +1498,19 @@ export const actions: Actions = {
 		const { ownerId, tripId } = ctx(locals, params);
 		await deleteTrip(ownerId, tripId);
 		throw redirect(303, '/');
+	},
+
+	// td-92bdfe: reversible; strict boolean like the visited endpoints — a
+	// malformed value must not silently unarchive.
+	archive: async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		const form = await request.formData();
+		const raw = (form.get('archived') ?? '').toString();
+		if (raw !== 'true' && raw !== 'false') {
+			return fail(400, { error: 'archived must be "true" or "false".' });
+		}
+		const ok = await setTripArchived(ownerId, tripId, raw === 'true');
+		if (!ok) throw error(404, 'Trip not found');
+		return { ok: true };
 	}
 };

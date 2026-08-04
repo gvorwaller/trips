@@ -5,7 +5,7 @@
 // viewer-of-A probe must hit.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { query, closePool } from '$lib/db';
-import { listTrips, getTrip, updateTrip, deleteTrip } from '$server/trips';
+import { listTrips, getTrip, setTripArchived, updateTrip, deleteTrip } from '$server/trips';
 import {
 	listTemplates,
 	saveListAsTemplate,
@@ -144,6 +144,20 @@ afterAll(async () => {
 
 // ── Trips ────────────────────────────────────────────────────────────────
 describe('trips owner filtering', () => {
+	it('setTripArchived is owner-scoped and round-trips (td-92bdfe)', async () => {
+		expect(await setTripArchived(b, tripA, true)).toBe(false);
+		let row = await getTrip(a, tripA);
+		expect(row?.archived_at).toBeNull();
+
+		expect(await setTripArchived(a, tripA, true)).toBe(true);
+		row = await getTrip(a, tripA);
+		expect(row?.archived_at).not.toBeNull();
+
+		expect(await setTripArchived(a, tripA, false)).toBe(true);
+		row = await getTrip(a, tripA);
+		expect(row?.archived_at).toBeNull();
+	});
+
 	it('listTrips shows each account only its own trips', async () => {
 		const forA = await listTrips(a);
 		const forB = await listTrips(b);

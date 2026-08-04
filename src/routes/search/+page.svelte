@@ -29,7 +29,10 @@
 			{#each data.hits as hit, i (hit.kind + '-' + (hit.item_id ?? 'trip') + '-' + i)}
 				<div class="obs">
 					<div class="grow">
-						<div class="name"><a href="/trips/{hit.trip_id}">{hit.title}</a></div>
+						<div class="name">
+							<a href="/trips/{hit.trip_id}">{hit.title}</a>
+							{#if hit.trip_archived}<span class="badge need">archived</span>{/if}
+						</div>
 						<div class="meta">{KIND_LABEL[hit.kind] ?? hit.kind} · in {hit.trip_name}</div>
 					</div>
 				</div>

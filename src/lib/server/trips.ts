@@ -9,6 +9,7 @@ export interface Trip {
 	notes: string | null;
 	created_at: string;
 	updated_at: string;
+	archived_at: string | null;
 }
 
 export interface TripInput {
@@ -24,7 +25,7 @@ export async function listTrips(ownerId: number): Promise<Trip[]> {
 		`SELECT id, owner_id, name,
 		        to_char(start_date, 'YYYY-MM-DD') AS start_date,
 		        to_char(end_date,   'YYYY-MM-DD') AS end_date,
-		        notes, created_at, updated_at
+		        notes, created_at, updated_at, archived_at
 		   FROM trips
 		  WHERE owner_id = $1
 		  ORDER BY start_date DESC NULLS LAST, created_at DESC`,
@@ -39,7 +40,7 @@ export async function getTrip(ownerId: number, tripId: number): Promise<Trip | n
 		`SELECT id, owner_id, name,
 		        to_char(start_date, 'YYYY-MM-DD') AS start_date,
 		        to_char(end_date,   'YYYY-MM-DD') AS end_date,
-		        notes, created_at, updated_at
+		        notes, created_at, updated_at, archived_at
 		   FROM trips
 		  WHERE id = $1 AND owner_id = $2`,
 		[tripId, ownerId]
@@ -72,6 +73,23 @@ export async function updateTrip(
 	return (res.rowCount ?? 0) > 0;
 }
 
+/** Archive (or restore) a trip. Reversible; the trip and its data are
+ * untouched apart from the flag. Owner-scoped inside the UPDATE. */
+export async function setTripArchived(
+	ownerId: number,
+	tripId: number,
+	archived: boolean
+): Promise<boolean> {
+	const res = await query(
+		`UPDATE trips
+		    SET archived_at = CASE WHEN $3 THEN NOW() ELSE NULL END,
+		        updated_at = NOW()
+		  WHERE id = $1 AND owner_id = $2`,
+		[tripId, ownerId, archived]
+	);
+	return (res.rowCount ?? 0) > 0;
+}
+
 /**
  * DELIBERATE lock-order exception (td-36b55b): deleting a trip locks the
  * trips row FIRST and then cascades into every child table — the reverse of
@@ -79,12 +97,26 @@ export async function updateTrip(
  * follows. A full prelock would have to enumerate every cascade target
  * (items, plans, stops, packing lists/items, reservations, attachments,
  * expenses, …) in canonical order and keep that list in lockstep with the
- * schema forever. Accepted instead: a concurrent writer racing a whole-trip
- * delete may get a retryable 40P01, and the trip is gone either way.
+ * schema forever. Accepted instead: either side of the race may be chosen as
+ * the 40P01 deadlock victim — the concurrent writer's request fails
+ * retryably, and if the DELETE itself is the victim, the bounded retry below
+ * re-runs it so the user's intent still lands (peer CODEX, review round 1:
+ * without the retry, "the trip is gone either way" was an overpromise).
  */
 export async function deleteTrip(ownerId: number, tripId: number): Promise<boolean> {
-	const res = await query(`DELETE FROM trips WHERE id = $1 AND owner_id = $2`, [tripId, ownerId]);
-	return (res.rowCount ?? 0) > 0;
+	for (let attempt = 1; ; attempt++) {
+		try {
+			const res = await query(`DELETE FROM trips WHERE id = $1 AND owner_id = $2`, [
+				tripId,
+				ownerId
+			]);
+			return (res.rowCount ?? 0) > 0;
+		} catch (err) {
+			const code = (err as { code?: string }).code;
+			if (code === '40P01' && attempt < 3) continue;
+			throw err;
+		}
+	}
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;

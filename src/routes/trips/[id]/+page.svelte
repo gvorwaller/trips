@@ -1753,7 +1753,10 @@
 <div class="page-head trip-page-head">
 	<a class="muted back" href="/">← All trips</a>
 	<h1>{data.trip.name}</h1>
-	<div class="sub">{fmtRange(data.trip.start_date, data.trip.end_date)}</div>
+	<div class="sub">
+		{fmtRange(data.trip.start_date, data.trip.end_date)}{#if data.trip.archived_at}
+			· <span class="badge need">archived</span>{/if}
+	</div>
 	<button type="button" class="btn small print-btn" onclick={printSheet}>🖨 Print</button>
 </div>
 
@@ -4318,6 +4321,14 @@
 		<form method="POST" action="?/duplicate" use:enhance class="inline">
 			<input type="hidden" name="client_time_zone" value={localTimeZone} />
 			<button class="btn" type="submit">Duplicate</button>
+		</form>
+		<!-- Reversible, so no confirm modal (house rule reserves those for
+		     destructive actions). -->
+		<form method="POST" action="?/archive" use:enhance class="inline">
+			<input type="hidden" name="archived" value={data.trip.archived_at ? 'false' : 'true'} />
+			<button class="btn" type="submit">
+				{data.trip.archived_at ? 'Unarchive' : 'Archive'}
+			</button>
 		</form>
 		<button
 			class="btn danger"

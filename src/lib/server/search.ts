@@ -8,6 +8,7 @@ export interface SearchHit {
 	trip_name: string;
 	title: string;
 	item_id: number | null;
+	trip_archived: boolean;
 }
 
 /** Simple ILIKE search across an owner's trips, places, packing, reservations. */
@@ -16,30 +17,31 @@ export async function search(ownerId: number, q: string): Promise<SearchHit[]> {
 	if (term.length < 2) return [];
 	const like = `%${term}%`;
 	const res = await query<SearchHit>(
-		`SELECT 'trip'::text AS kind, t.id AS trip_id, t.name AS trip_name, t.name AS title, NULL::int AS item_id
+		`SELECT 'trip'::text AS kind, t.id AS trip_id, t.name AS trip_name, t.name AS title, NULL::int AS item_id,
+		        (t.archived_at IS NOT NULL) AS trip_archived
 		   FROM trips t
 		  WHERE t.owner_id = $1 AND lower(t.name) LIKE $2
 		 UNION ALL
-		 SELECT 'place', t.id, t.name, ii.title, ii.id
+		 SELECT 'place', t.id, t.name, ii.title, ii.id, (t.archived_at IS NOT NULL)
 		   FROM itinerary_items ii JOIN trips t ON t.id = ii.trip_id
 		  WHERE t.owner_id = $1 AND (lower(ii.title) LIKE $2 OR lower(COALESCE(ii.notes, '')) LIKE $2)
 		 UNION ALL
-		 SELECT 'packing', t.id, t.name, pi.name, pi.id
+		 SELECT 'packing', t.id, t.name, pi.name, pi.id, (t.archived_at IS NOT NULL)
 		   FROM packing_items pi
 		   JOIN packing_lists pl ON pl.id = pi.list_id
 		   JOIN trips t ON t.id = pl.trip_id
 		  WHERE t.owner_id = $1 AND lower(pi.name) LIKE $2
 		 UNION ALL
-		 SELECT 'reservation', t.id, t.name, r.title, r.id
+		 SELECT 'reservation', t.id, t.name, r.title, r.id, (t.archived_at IS NOT NULL)
 		   FROM reservations r JOIN trips t ON t.id = r.trip_id
 		  WHERE t.owner_id = $1 AND lower(r.title) LIKE $2
 		 UNION ALL
-		 SELECT 'document', t.id, t.name, COALESCE(a.display_name, a.original_name), a.id
+		 SELECT 'document', t.id, t.name, COALESCE(a.display_name, a.original_name), a.id, (t.archived_at IS NOT NULL)
 		   FROM attachments a JOIN trips t ON t.id = a.trip_id
 		  WHERE t.owner_id = $1 AND a.status = 'active'
 		    AND (lower(a.original_name) LIKE $2 OR lower(COALESCE(a.display_name, '')) LIKE $2 OR lower(COALESCE(a.text_content, '')) LIKE $2)
 		 UNION ALL
-		 SELECT 'expense', t.id, t.name, e.description, e.id
+		 SELECT 'expense', t.id, t.name, e.description, e.id, (t.archived_at IS NOT NULL)
 		   FROM expenses e JOIN trips t ON t.id = e.trip_id
 		  WHERE t.owner_id = $1 AND lower(e.description) LIKE $2
 		 LIMIT 50`,

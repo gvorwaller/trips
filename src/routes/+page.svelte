@@ -3,6 +3,8 @@
 
 	let { data }: { data: PageData } = $props();
 	const isViewer = $derived(data.user?.role === 'viewer');
+	const activeTrips = $derived(data.trips.filter((t) => !t.archived_at));
+	const archivedTrips = $derived(data.trips.filter((t) => t.archived_at));
 
 	function fmtRange(start: string | null, end: string | null): string {
 		if (!start && !end) return 'No dates set';
@@ -30,6 +32,16 @@
 	}
 </script>
 
+{#snippet tripRow(trip: PageData['trips'][number])}
+	<div class="obs">
+		<div class="grow">
+			<div class="name"><a href="/trips/{trip.id}">{trip.name}</a></div>
+			<div class="meta">{fmtRange(trip.start_date, trip.end_date)}</div>
+			<div class="meta">{fmtUpdated(trip.updated_at)}</div>
+		</div>
+	</div>
+{/snippet}
+
 <svelte:head><title>Trips</title></svelte:head>
 
 <div class="page-head trip-row" style="justify-content: space-between">
@@ -47,15 +59,38 @@
 		{/if}
 	</div>
 {:else}
-	<div class="card">
-		{#each data.trips as trip (trip.id)}
-			<div class="obs">
-				<div class="grow">
-					<div class="name"><a href="/trips/{trip.id}">{trip.name}</a></div>
-					<div class="meta">{fmtRange(trip.start_date, trip.end_date)}</div>
-					<div class="meta">{fmtUpdated(trip.updated_at)}</div>
-				</div>
-			</div>
-		{/each}
-	</div>
+	{#if activeTrips.length > 0}
+		<div class="card">
+			{#each activeTrips as trip (trip.id)}
+				{@render tripRow(trip)}
+			{/each}
+		</div>
+	{:else}
+		<div class="card empty">
+			<p>No active trips — everything is archived.</p>
+		</div>
+	{/if}
+
+	{#if archivedTrips.length > 0}
+		<!-- Archived trips stay fully readable (td-92bdfe: "for future
+		     reference") — they just live behind this fold instead of the
+		     main list. -->
+		<details class="card archived-trips">
+			<summary>Archived ({archivedTrips.length})</summary>
+			{#each archivedTrips as trip (trip.id)}
+				{@render tripRow(trip)}
+			{/each}
+		</details>
+	{/if}
 {/if}
+
+<style>
+	.archived-trips summary {
+		cursor: pointer;
+		font-weight: 600;
+		/* Standalone control → 48px tap target (cs.md). */
+		min-height: 48px;
+		display: flex;
+		align-items: center;
+	}
+</style>
