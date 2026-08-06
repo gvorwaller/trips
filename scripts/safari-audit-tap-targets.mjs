@@ -427,7 +427,8 @@ async function main() {
 			['.dayplan-stop-links > button', 2],
 			['.caret', 2],
 			['.chk-hit', 2],
-			['.route-tools select', 1],
+			// td-036f71 replaced the native anchor <select> with the combobox.
+			['.route-tools .searchable-select input', 1],
 			['.linkbtn', 1]
 		]);
 
