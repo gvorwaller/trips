@@ -33,7 +33,14 @@ import {
 	deleteTemplate
 } from '$server/templates';
 import { duplicateTrip } from '$server/clone';
-import { runTreeOp, runReparent, type TreeOp } from '$server/tree-sql';
+import {
+	ItemNotInContainerError,
+	TreeConcurrencyError,
+	runTreeOp,
+	runReparent,
+	runReparentMany,
+	type TreeOp
+} from '$server/tree-sql';
 import { flattenTree } from '$server/tree';
 import {
 	listReservations,
@@ -729,6 +736,45 @@ export const actions: Actions = {
 		if (item.parent_id === parentId) return { ok: true, moved: false };
 		const ok = await runReparent('itinerary_items', tripId, id, parentId, Number.MAX_SAFE_INTEGER);
 		return { ok, moved: ok };
+	},
+
+	'itin-reparent-many': async ({ params, request, locals }) => {
+		const { ownerId, tripId } = ctx(locals, params);
+		await ownTrip(ownerId, tripId);
+		const form = await request.formData();
+		// Strict parsing: malformed input must reject the batch, not silently
+		// become a DIFFERENT valid move (peer CODEX — optId('garbage') would
+		// have meant top level, and filtering bad ids would have moved only a
+		// subset of what was posted).
+		const rawParent = (form.get('parent_id') ?? '').toString();
+		let parentId: number | null = null;
+		if (rawParent !== '') {
+			const n = Number(rawParent);
+			if (!Number.isInteger(n) || n <= 0) return fail(400, { error: 'Invalid destination.' });
+			parentId = n;
+		}
+		const ids: number[] = [];
+		for (const v of form.getAll('ids')) {
+			const n = Number(v.toString());
+			if (!Number.isInteger(n) || n <= 0) return fail(400, { error: 'Invalid selection.' });
+			ids.push(n);
+		}
+		if (ids.length === 0) return fail(400, { error: 'Select at least one item.' });
+		try {
+			const ok = await runReparentMany('itinerary_items', tripId, ids, parentId);
+			if (!ok) return fail(400, { error: 'Cannot move items under something you selected.' });
+			return { ok: true, moved: ids.length };
+		} catch (err) {
+			if (err instanceof ItemNotInContainerError) {
+				return fail(400, { error: 'Some items could not be moved. Nothing was changed.' });
+			}
+			if (err instanceof TreeConcurrencyError) {
+				return fail(400, {
+					error: 'The list changed in another window. Nothing was moved — try again.'
+				});
+			}
+			throw err; // real failures (DB down, bugs) stay observable 500s
+		}
 	},
 
 	// ── Day plans ─────────────────────────────────────────

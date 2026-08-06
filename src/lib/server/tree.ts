@@ -178,3 +178,65 @@ export function computeReparent(
 	}
 	return changes;
 }
+
+/**
+ * Reparent several nodes under `newParentId` at once, appended after its
+ * existing children in document (flattened-tree) order — the order the ids
+ * arrive in is irrelevant. Selected ids whose ancestor is also selected are
+ * dropped, not rejected: they travel with the moved subtree, so checking a
+ * branch and some of its children is a valid gesture. A node already under
+ * the target is reindexed into the appended run like everything else.
+ * Returns [] (rejected) when ids are empty or unknown, the parent is
+ * unknown, or the target lies inside any selected subtree (union cycle
+ * check). All-or-nothing: one combined change set, applied in one
+ * transaction by the SQL layer.
+ */
+export function computeReparentMany(
+	nodes: TreeNode[],
+	ids: number[],
+	newParentId: number | null
+): Change[] {
+	const byId = new Map(nodes.map((n) => [n.id, n]));
+	const uniqueIds = [...new Set(ids)];
+	if (uniqueIds.length === 0) return [];
+	if (uniqueIds.some((id) => !byId.has(id))) return [];
+	if (newParentId !== null && !byId.has(newParentId)) return [];
+
+	// Effective roots: drop any id with a selected ancestor.
+	const selected = new Set(uniqueIds);
+	const roots = uniqueIds.filter((id) => {
+		let p = byId.get(id)?.parent_id ?? null;
+		while (p !== null) {
+			if (selected.has(p)) return false;
+			p = byId.get(p)?.parent_id ?? null;
+		}
+		return true;
+	});
+	const rootSet = new Set(roots);
+	if (roots.some((r) => wouldCreateCycle(nodes, r, newParentId))) return [];
+
+	const docIndex = new Map(flattenTree(nodes).map(({ node }, i) => [node.id, i]));
+	roots.sort((a, b) => (docIndex.get(a) ?? 0) - (docIndex.get(b) ?? 0));
+
+	const targetGroup = childrenOf(nodes, newParentId).filter((n) => !rootSet.has(n.id));
+	for (const r of roots) targetGroup.push(byId.get(r) as TreeNode);
+	const changes = reindex(targetGroup, newParentId);
+
+	// Densify each distinct old sibling group. Disjointness: a root's old
+	// parent can never itself be selected (the root would not be a root) and
+	// never lies inside another selected subtree, so no id is emitted twice.
+	const oldParents = new Set<number | null>();
+	for (const r of roots) {
+		const p = (byId.get(r) as TreeNode).parent_id;
+		if (p !== newParentId) oldParents.add(p);
+	}
+	for (const p of oldParents) {
+		changes.push(
+			...reindex(
+				childrenOf(nodes, p).filter((n) => !rootSet.has(n.id)),
+				p
+			)
+		);
+	}
+	return changes;
+}

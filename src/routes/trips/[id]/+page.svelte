@@ -1661,6 +1661,63 @@
 			.toLowerCase();
 	}
 
+	// ── Bulk "move under" selection (td-947440) ──────────────
+	// Selection is by id, so it survives folding and searching; the bulk-bar
+	// count is the source of truth, not what happens to be visible.
+	let placesSelectMode = $state(false);
+	let placesSelected = $state<Record<number, boolean>>({});
+	let bulkMoveParent = $state('');
+	let bulkMoveError = $state('');
+	const placesSelectedIds = $derived(
+		Object.entries(placesSelected)
+			.filter(([, on]) => on)
+			.map(([id]) => Number(id))
+	);
+
+	function exitPlacesSelectMode() {
+		placesSelectMode = false;
+		placesSelected = {};
+		bulkMoveParent = '';
+		bulkMoveError = '';
+	}
+
+	/**
+	 * With a search active, select only the DIRECT matches — the ancestor rows
+	 * the filter shows for context would silently drag whole subtrees along.
+	 */
+	function selectAllPlaces() {
+		const ids = placesQuery ? [...placesDirectMatchIds] : data.itineraryRows.map((r) => r.node.id);
+		const next: Record<number, boolean> = { ...placesSelected };
+		for (const id of ids) next[id] = true;
+		placesSelected = next;
+	}
+
+	// Bulk targets exclude every selected node and everything inside a selected
+	// subtree (the server re-checks — this is UX, the union cycle check is the
+	// backstop).
+	const bulkExcludedIds = $derived.by(() => {
+		const out = new Set(placesSelectedIds);
+		for (const { node } of data.itineraryRows) {
+			if (out.has(node.id)) continue;
+			if (placesSelectedIds.some((a) => isItinDescendant(node.id, a))) out.add(node.id);
+		}
+		return out;
+	});
+	const bulkMoveParentOptions = $derived([
+		{ value: '', label: 'Top level' },
+		...itinImportParents
+			.filter((row) => !bulkExcludedIds.has(row.node.id))
+			.map((row) => ({
+				value: String(row.node.id),
+				label: itinParentOptionLabel(row),
+				searchText: `${row.node.title} ${row.node.item_type}`
+			}))
+	]);
+	/** The chosen target became excluded by a later selection change. */
+	const bulkTargetInvalid = $derived(
+		bulkMoveParent !== '' && bulkExcludedIds.has(Number(bulkMoveParent))
+	);
+
 	const placesDirectMatchIds = $derived.by(() => {
 		const matches = new Set<number>();
 		if (!placesQuery) return matches;
@@ -2837,11 +2894,30 @@
 					{/if}
 				</span>
 			</div>
-			{#if itinParents.size > 0}
+			{#if itinParents.size > 0 || !isViewer}
 				<div class="tree-tools">
-					<button type="button" class="linkbtn" onclick={collapseAllItin}>Collapse all</button>
-					<span class="sep" aria-hidden="true">·</span>
-					<button type="button" class="linkbtn" onclick={expandAllItin}>Expand all</button>
+					{#if itinParents.size > 0}
+						<button type="button" class="linkbtn" onclick={collapseAllItin}>Collapse all</button>
+						<span class="sep" aria-hidden="true">·</span>
+						<button type="button" class="linkbtn" onclick={expandAllItin}>Expand all</button>
+					{/if}
+					{#if !isViewer}
+						{#if itinParents.size > 0}<span class="sep" aria-hidden="true">·</span>{/if}
+						<button
+							type="button"
+							class="linkbtn"
+							onclick={() => (placesSelectMode ? exitPlacesSelectMode() : (placesSelectMode = true))}
+							>{placesSelectMode ? 'Done' : 'Select'}</button
+						>
+						{#if placesSelectMode}
+							<span class="sep" aria-hidden="true">·</span>
+							<button type="button" class="linkbtn" onclick={selectAllPlaces}>Select all</button>
+							<span class="sep" aria-hidden="true">·</span>
+							<button type="button" class="linkbtn" onclick={() => (placesSelected = {})}
+								>Clear</button
+							>
+						{/if}
+					{/if}
 					{#if placesQuery}
 						<span class="muted">Matches include parent groups</span>
 					{/if}
@@ -2876,7 +2952,20 @@
 								{:else}
 									<span class="caret-spacer" aria-hidden="true"></span>
 								{/if}
-								{#if node.item_type === 'place'}
+								{#if !isViewer && placesSelectMode}
+									<!-- Takes the visited checkbox's slot; accent + every row type
+									     (not just places) make the different meaning visible. -->
+									<label class="chk-hit">
+										<input
+											type="checkbox"
+											class="chk select-chk"
+											checked={placesSelected[node.id] ?? false}
+											aria-label={`Select ${node.title}`}
+											onchange={(e) =>
+												(placesSelected = { ...placesSelected, [node.id]: e.currentTarget.checked })}
+										/>
+									</label>
+								{:else if node.item_type === 'place'}
 									<label class="chk-hit">
 										<input
 											type="checkbox"
@@ -2948,7 +3037,7 @@
 										{/if}
 									</div>
 								</span>
-								{#if !isViewer}{@render treeControls(
+								{#if !isViewer && !placesSelectMode}{@render treeControls(
 										node.id,
 										'itin-move',
 										'itin-delete',
@@ -2957,7 +3046,7 @@
 										itinHasChildren(node.id)
 									)}{/if}
 							</div>
-							{#if !isViewer}
+							{#if !isViewer && !placesSelectMode}
 								<details class="edit">
 									<summary>edit</summary>
 									<form
@@ -3008,6 +3097,58 @@
 						</li>
 					{/each}
 				</ul>
+			{/if}
+			{#if !isViewer && placesSelectMode}
+				<form
+					method="POST"
+					action="?/itin-reparent-many"
+					class="bulk-move-bar"
+					use:enhance={() => {
+						bulkMoveError = '';
+						return async ({ result, update }) => {
+							if (result.type === 'failure') {
+								bulkMoveError = (result.data as { error?: string })?.error ?? 'Could not move.';
+								return;
+							}
+							await update({ reset: false });
+							// Reveal the destination so the moved rows are visible.
+							const target = bulkMoveParent === '' ? null : Number(bulkMoveParent);
+							if (target !== null && itinCollapsed.has(target)) toggleItin(target);
+							exitPlacesSelectMode();
+						};
+					}}
+				>
+					{#each placesSelectedIds as id (id)}
+						<input type="hidden" name="ids" value={id} />
+					{/each}
+					<span class="bulk-count">{placesSelectedIds.length} selected</span>
+					<div class="bulk-move-target">
+						<SearchableSelect
+							name="parent_id"
+							bind:selectedValue={bulkMoveParent}
+							options={bulkMoveParentOptions}
+							ariaLabel="Move selected under"
+							placeholder="Search destination"
+							emptyMessage="No destinations match"
+							maxResults={500}
+							listboxId="bulk-move-parent-options"
+						/>
+					</div>
+					<button
+						class="btn small"
+						type="button"
+						disabled={placesSelectedIds.length === 0}
+						onclick={() => (placesSelected = {})}>Clear</button
+					>
+					<button
+						class="btn small primary"
+						type="submit"
+						disabled={placesSelectedIds.length === 0 || bulkTargetInvalid}>Move</button
+					>
+				</form>
+				{#if bulkMoveError}
+					<p class="field-error" role="alert">{bulkMoveError}</p>
+				{/if}
 			{/if}
 		{/if}
 
@@ -6127,6 +6268,40 @@
 		line-height: 1.45;
 		white-space: pre-wrap;
 	}
+	/* Bulk move-under (td-947440): selection checkboxes read differently from
+	   the visited ones, and the bar rides above the phone bottom nav. */
+	.select-chk {
+		accent-color: var(--accent);
+	}
+	.bulk-move-bar {
+		position: sticky;
+		bottom: calc(var(--bottomnav-h) + env(safe-area-inset-bottom) + 8px);
+		z-index: 30;
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 8px;
+		padding: 10px;
+		margin-top: 10px;
+		border: 1px solid var(--border);
+		border-radius: 10px;
+		background: var(--card);
+		box-shadow: 0 6px 18px rgb(0 0 0 / 0.12);
+	}
+	@media (min-width: 640px) {
+		.bulk-move-bar {
+			bottom: 12px;
+		}
+	}
+	.bulk-count {
+		font-size: 0.9rem;
+		color: var(--muted);
+		white-space: nowrap;
+	}
+	.bulk-move-target {
+		flex: 1 1 200px;
+		min-width: 0;
+	}
 	@media print {
 		/* Reveal everything folded on screen: `revert` lands on the UA default
 		   (block / list-item), and this rule is after the screen rule so it wins. */
@@ -6144,6 +6319,7 @@
 		.dayplan-note-form,
 		.dayplan-builder,
 		.dayplan-visited input,
+		.bulk-move-bar,
 		.leg-links {
 			display: none !important;
 		}

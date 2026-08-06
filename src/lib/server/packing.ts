@@ -1,5 +1,5 @@
 import { query, withTransaction } from '$lib/db';
-import { nextSortOrder, placeNodeRelative } from './tree-sql';
+import { lockTreeContainer, nextSortOrder, placeNodeRelative } from './tree-sql';
 
 export interface PackingList {
 	id: number;
@@ -153,6 +153,12 @@ export async function createPackingItemAt(
 	item: Pick<NewPackingItem, 'name' | 'quantity' | 'category' | 'notes'>
 ): Promise<number | null> {
 	return withTransaction(async (client) => {
+		// Container barrier FIRST — this writer takes list-wide row locks
+		// before its nextSortOrder call, and acquiring the advisory lock only
+		// there would invert the advisory → rows order into a deadlock cycle
+		// against tree ops (peer CODEX, td-947440 re-review). Re-entrant, so
+		// the nested nextSortOrder/placeNodeRelative acquisitions are free.
+		await lockTreeContainer(client, 'packing_items', listId);
 		const ref = await client.query<{ parent_id: number | null }>(
 			`SELECT parent_id FROM packing_items WHERE id = $1 AND list_id = $2`,
 			[refId, listId]

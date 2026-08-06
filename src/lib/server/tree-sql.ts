@@ -5,6 +5,7 @@ import {
 	computeIndent,
 	computeOutdent,
 	computeReparent,
+	computeReparentMany,
 	childrenOf,
 	type Change,
 	type TreeNode
@@ -20,10 +21,48 @@ const CONTAINER_COL = {
 export type TreeTable = keyof typeof CONTAINER_COL;
 export type TreeOp = 'move-up' | 'move-down' | 'indent' | 'outdent';
 
+/** A batch id that is not in the loaded container (cross-trip/list, or stale). */
+export class ItemNotInContainerError extends Error {
+	constructor() {
+		super('Item does not belong to this container');
+	}
+}
+
+/** The tree changed between snapshot and lock; the transaction wrote nothing. */
+export class TreeConcurrencyError extends Error {
+	constructor() {
+		super('Tree changed concurrently; nothing was written');
+	}
+}
+
 function assertTable(table: TreeTable): string {
 	const col = CONTAINER_COL[table];
 	if (!col) throw new Error(`Unknown tree table: ${table}`);
 	return col;
+}
+
+/**
+ * Serialize every group-membership-changing writer per (table, container):
+ * the reindexers (move/indent/outdent/reparent/bulk reparent) and the
+ * inserters (nextSortOrder's MAX — every insert path funnels through it).
+ * Without a common barrier, an INSERT can compute MAX from a group a
+ * concurrent reindex is rewriting and commit a duplicate sort_order (peer
+ * CODEX, td-947440 re-review: the row-count guard only proves rows the
+ * change set already knows about still exist; it cannot see phantoms).
+ * Advisory xact locks are re-entrant in-transaction and release at commit,
+ * and are taken BEFORE any row lock, so the global order stays
+ * advisory → item rows → trips (td-36b55b). Exported for writers that must
+ * take their own row locks before calling nextSortOrder (createPackingItemAt)
+ * — they acquire this FIRST or the order inverts into a deadlock cycle.
+ */
+export async function lockTreeContainer(
+	client: pg.PoolClient,
+	table: TreeTable,
+	containerId: number
+): Promise<void> {
+	assertTable(table);
+	const tableKey = table === 'itinerary_items' ? 1 : 2;
+	await client.query(`SELECT pg_advisory_xact_lock($1::int4, $2::int4)`, [tableKey, containerId]);
 }
 
 async function loadNodes(
@@ -53,15 +92,21 @@ async function applyChanges(
 	// against writers following the canonical item(s) → … → trips order
 	// (peer CODEX reproduced move-up vs deleteItem, td-36b55b round 1).
 	const ids = [...new Set(changes.map((c) => c.id))].sort((x, y) => x - y);
-	await client.query(
+	const locked = await client.query(
 		`SELECT id FROM ${table} WHERE id = ANY($1::int[]) ORDER BY id FOR UPDATE`,
 		[ids]
 	);
+	// The snapshot the changes were computed from must still be intact: a row
+	// deleted between load and prelock would otherwise be skipped silently —
+	// a partial write from a change set that promised all-or-nothing, plus
+	// sort-order gaps from reindexing stale state (peer CODEX, td-947440).
+	if (locked.rowCount !== ids.length) throw new TreeConcurrencyError();
 	for (const c of changes) {
-		await client.query(
+		const updated = await client.query(
 			`UPDATE ${table} SET parent_id = $2, sort_order = $3, updated_at = NOW() WHERE id = $1`,
 			[c.id, c.parent_id, c.sort_order]
 		);
+		if (updated.rowCount !== 1) throw new TreeConcurrencyError();
 	}
 }
 
@@ -73,6 +118,7 @@ export async function nextSortOrder(
 	parentId: number | null
 ): Promise<number> {
 	const col = assertTable(table);
+	await lockTreeContainer(client, table, containerId);
 	const res = await client.query<{ next: number }>(
 		`SELECT COALESCE(MAX(sort_order) + 1, 0) AS next
 		   FROM ${table}
@@ -97,6 +143,7 @@ export async function placeNodeRelative(
 	refId: number,
 	position: 'above' | 'below'
 ): Promise<void> {
+	await lockTreeContainer(client, table, containerId);
 	const nodes = await loadNodes(client, table, containerId);
 	// Index of the reference among siblings as they stand before placing newId.
 	const sibs = childrenOf(
@@ -118,6 +165,7 @@ export async function runTreeOp(
 	op: TreeOp
 ): Promise<void> {
 	await withTransaction(async (client) => {
+		await lockTreeContainer(client, table, containerId);
 		const nodes = await loadNodes(client, table, containerId);
 		if (!nodes.find((n) => n.id === id)) {
 			throw new Error('Item does not belong to this container');
@@ -141,6 +189,33 @@ export async function runTreeOp(
 	});
 }
 
+/**
+ * Bulk reparent, appended at the end of the new parent's children, in ONE
+ * transaction with ONE applyChanges — the id-ordered FOR UPDATE prelock must
+ * cover every touched row of the whole batch (td-36b55b), so this must never
+ * be a loop over runReparent. All-or-nothing: any id outside the container
+ * throws and nothing is written.
+ */
+export async function runReparentMany(
+	table: TreeTable,
+	containerId: number,
+	ids: number[],
+	newParentId: number | null
+): Promise<boolean> {
+	return withTransaction(async (client) => {
+		await lockTreeContainer(client, table, containerId);
+		const nodes = await loadNodes(client, table, containerId);
+		const known = new Set(nodes.map((n) => n.id));
+		if (ids.some((id) => !known.has(id))) {
+			throw new ItemNotInContainerError();
+		}
+		const changes = computeReparentMany(nodes, ids, newParentId);
+		if (changes.length === 0) return false; // rejected (empty / unknown parent / cycle union)
+		await applyChanges(client, table, changes);
+		return true;
+	});
+}
+
 /** Drag-and-drop reparent. Cross-container is impossible (nodes scoped to one container). */
 export async function runReparent(
 	table: TreeTable,
@@ -150,6 +225,7 @@ export async function runReparent(
 	index: number
 ): Promise<boolean> {
 	return withTransaction(async (client) => {
+		await lockTreeContainer(client, table, containerId);
 		const nodes = await loadNodes(client, table, containerId);
 		if (!nodes.find((n) => n.id === id)) {
 			throw new Error('Item does not belong to this container');

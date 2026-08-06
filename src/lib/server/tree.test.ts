@@ -7,6 +7,7 @@ import {
 	computeIndent,
 	computeOutdent,
 	computeReparent,
+	computeReparentMany,
 	orderParentsFirst,
 	flattenTree,
 	type TreeNode
@@ -113,6 +114,93 @@ describe('computeReparent', () => {
 	});
 	it('rejects an unknown parent (cross-container guard at logic level)', () => {
 		expect(computeReparent(base, 3, 999, 0)).toEqual([]);
+	});
+});
+
+describe('computeReparentMany', () => {
+	// A wider tree:
+	//  1 (top)
+	//    3
+	//    4
+	//  2 (top)
+	//    5
+	//  6 (top)
+	const wide: TreeNode[] = [
+		{ id: 1, parent_id: null, sort_order: 0 },
+		{ id: 2, parent_id: null, sort_order: 1 },
+		{ id: 6, parent_id: null, sort_order: 2 },
+		{ id: 3, parent_id: 1, sort_order: 0 },
+		{ id: 4, parent_id: 1, sort_order: 1 },
+		{ id: 5, parent_id: 2, sort_order: 0 }
+	];
+
+	it('appends roots from different parents under the target, densifying old groups', () => {
+		const after = apply(wide, computeReparentMany(wide, [4, 5], 6));
+		expect(childrenOf(after, 6).map((n) => n.id)).toEqual([4, 5]);
+		expect(childrenOf(after, 1).map((n) => n.id)).toEqual([3]);
+		expect(childrenOf(after, 2).map((n) => n.id)).toEqual([]);
+		// Old groups are dense 0..n-1.
+		expect(childrenOf(after, 1).map((n) => n.sort_order)).toEqual([0]);
+	});
+
+	it('lands in document order regardless of the order ids were passed', () => {
+		const after = apply(wide, computeReparentMany(wide, [5, 3], 6));
+		// Document order is 3 (under 1) before 5 (under 2).
+		expect(childrenOf(after, 6).map((n) => n.id)).toEqual([3, 5]);
+	});
+
+	it('appends after the target’s existing children', () => {
+		const after = apply(wide, computeReparentMany(wide, [5], 1));
+		expect(childrenOf(after, 1).map((n) => n.id)).toEqual([3, 4, 5]);
+	});
+
+	it('drops a selected id whose ancestor is also selected (it travels with the subtree)', () => {
+		const changes = computeReparentMany(wide, [1, 4], 6);
+		const after = apply(wide, changes);
+		// 4 stays under its moved ancestor 1; only 1 landed under 6.
+		expect(after.find((n) => n.id === 4)?.parent_id).toBe(1);
+		expect(childrenOf(after, 6).map((n) => n.id)).toEqual([1]);
+	});
+
+	it('duplicate ids behave as deduped input', () => {
+		expect(computeReparentMany(wide, [4, 4, 5], 6)).toEqual(
+			computeReparentMany(wide, [4, 5], 6)
+		);
+	});
+
+	it('rejects a target that is selected or inside a selected subtree', () => {
+		expect(computeReparentMany(wide, [1, 2], 1)).toEqual([]); // target selected
+		expect(computeReparentMany(wide, [1], 4)).toEqual([]); // target inside selected subtree
+	});
+
+	it('rejects unknown ids, unknown parents and empty input', () => {
+		expect(computeReparentMany(wide, [999], 6)).toEqual([]);
+		expect(computeReparentMany(wide, [4], 999)).toEqual([]);
+		expect(computeReparentMany(wide, [], 6)).toEqual([]);
+	});
+
+	it('reindexes an item already under the target to the end of its children', () => {
+		const after = apply(wide, computeReparentMany(wide, [3, 5], 1));
+		expect(childrenOf(after, 1).map((n) => n.id)).toEqual([4, 3, 5]);
+	});
+
+	it('moves to top level', () => {
+		const after = apply(wide, computeReparentMany(wide, [4, 5], null));
+		expect(childrenOf(after, null).map((n) => n.id)).toEqual([1, 2, 6, 4, 5]);
+		expect(childrenOf(after, null).map((n) => n.sort_order)).toEqual([0, 1, 2, 3, 4]);
+	});
+
+	it('never emits the same id twice across the combined change set', () => {
+		for (const [ids, target] of [
+			[[4, 5], 6],
+			[[1, 4], 6],
+			[[3, 5], 1],
+			[[4, 5], null]
+		] as [number[], number | null][]) {
+			const changes = computeReparentMany(wide, ids, target);
+			const seen = changes.map((c) => c.id);
+			expect(new Set(seen).size, `ids ${ids} → ${target}`).toBe(seen.length);
+		}
 	});
 });
 
