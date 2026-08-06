@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
+	import { isIosStandalone } from '$lib/share';
 
 	type Props = {
 		url: string;
@@ -19,15 +20,6 @@
 
 	let saving = $state(false);
 	let message = $state('');
-
-	function isIosStandalone(): boolean {
-		if (!browser) return false;
-		const nav = navigator as Navigator & { standalone?: boolean };
-		const isiOS =
-			/iPad|iPhone|iPod/.test(navigator.userAgent) ||
-			(navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-		return isiOS && (nav.standalone === true || window.matchMedia('(display-mode: standalone)').matches);
-	}
 
 	function saveBlob(blob: Blob) {
 		const objectUrl = URL.createObjectURL(blob);

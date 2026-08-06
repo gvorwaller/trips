@@ -26,6 +26,7 @@
 		type RouteStop
 	} from '$lib/route';
 	import { dayPlanRouteLink } from '$lib/dayplan-export';
+	import { canShareText, shareText } from '$lib/share';
 	import {
 		collapsedKeys,
 		isCollapsed,
@@ -725,6 +726,96 @@
 		approximate: boolean;
 		total: number;
 	};
+	/**
+	 * Share-text modal (td-9ae4dd). The old <a> to the inline text/plain
+	 * export navigated the installed PWA's only window to a chrome-less text
+	 * view iOS gives no way to leave. The text now opens in-app: a dismissible
+	 * modal with system-share and copy. `error: true` renders the message
+	 * instead of a copyable body.
+	 */
+	let shareModal = $state<{ title: string; text: string; error: boolean } | null>(null);
+	let shareBusy = $state(false);
+	let shareCopied = $state(false);
+	let shareSheetError = $state('');
+	/** The Share text button that opened the modal; focus returns there on close. */
+	let shareReturnFocus: HTMLElement | null = null;
+	let shareCloseBtn = $state<HTMLButtonElement | null>(null);
+
+	// aria-modal promises a modal focus context: move focus in on open (Close
+	// is the deterministic landing spot), give it back on every close path.
+	$effect(() => {
+		if (shareModal && shareCloseBtn) shareCloseBtn.focus();
+	});
+
+	async function openShareText(url: string, title: string) {
+		if (shareBusy) return;
+		shareBusy = true;
+		shareCopied = false;
+		shareSheetError = '';
+		shareReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		try {
+			const res = await fetch(url, { credentials: 'same-origin' });
+			if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+			shareModal = { title, text: await res.text(), error: false };
+		} catch {
+			shareModal = {
+				title,
+				text: 'Could not load the text. Check your connection and try again.',
+				error: true
+			};
+		} finally {
+			shareBusy = false;
+		}
+	}
+
+	function closeShareModal() {
+		shareModal = null;
+		shareSheetError = '';
+		shareReturnFocus?.focus();
+		shareReturnFocus = null;
+	}
+
+	/** Keep Tab cycling inside the dialog while it is open. */
+	function trapShareFocus(e: KeyboardEvent) {
+		if (e.key !== 'Tab') return;
+		const dialog = e.currentTarget as HTMLElement;
+		const focusables = Array.from(
+			dialog.querySelectorAll<HTMLElement>('button:not([disabled]), textarea')
+		);
+		if (focusables.length === 0) return;
+		const first = focusables[0];
+		const last = focusables[focusables.length - 1];
+		if (e.shiftKey && document.activeElement === first) {
+			e.preventDefault();
+			last.focus();
+		} else if (!e.shiftKey && document.activeElement === last) {
+			e.preventDefault();
+			first.focus();
+		}
+	}
+
+	async function runShareSheet() {
+		if (!shareModal || shareModal.error) return;
+		shareSheetError = '';
+		const outcome = await shareText(shareModal.text, shareModal.title);
+		// 'cancelled' (user closed the sheet) stays quiet; a real failure must
+		// not leave the button looking dead.
+		if (outcome === 'failed' || outcome === 'unavailable') {
+			shareSheetError = 'Sharing failed here — use Copy instead.';
+		}
+	}
+
+	async function copyShareText() {
+		if (!shareModal || shareModal.error) return;
+		try {
+			await navigator.clipboard.writeText(shareModal.text);
+			shareCopied = true;
+			setTimeout(() => (shareCopied = false), 1600);
+		} catch {
+			// Clipboard denied — the text stays selectable in the box.
+		}
+	}
+
 	/** Day plan awaiting a name for its copy; null when the dialog is closed. */
 	let pendingDuplicatePlan = $state<{ id: number; title: string } | null>(null);
 	let duplicatePlanError = $state('');
@@ -1752,10 +1843,13 @@
 			· <span class="badge need">archived</span>{/if}
 	</div>
 	<button type="button" class="btn small print-btn" onclick={printSheet}>🖨 Print</button>
-	<a
+	<button
+		type="button"
 		class="btn small"
-		href="/trips/{data.trip.id}/export?format=txt&units={distanceUnit}"
-		title="plain text to paste into Messages">Share text</a
+		disabled={shareBusy}
+		onclick={() =>
+			openShareText(`/trips/${data.trip.id}/export?format=txt&units=${distanceUnit}`, data.trip.name)}
+		title="share or copy as plain text">Share text</button
 	>
 </div>
 
@@ -2039,10 +2133,16 @@
 								{/if}
 								{#if stops.length > 0}
 									{@const exportBase = `/trips/${data.trip.id}/dayplan/${plan.id}`}
-									<a
+									<button
+										type="button"
 										class="btn small"
-										href="{exportBase}/export?format=txt&units={distanceUnit}"
-										title="plain text to paste into Messages">Share text</a
+										disabled={shareBusy}
+										onclick={() =>
+											openShareText(
+												`${exportBase}/export?format=txt&units=${distanceUnit}`,
+												plan.title
+											)}
+										title="share or copy as plain text">Share text</button
 									>
 									<a class="btn small" href="{exportBase}/print?units={distanceUnit}"
 										>🖨 Print / PDF</a
@@ -4456,11 +4556,58 @@
 	</div>
 {/if}
 
+<!-- Outside the editor-only block: viewers can share too. Unlike the confirm
+     modals this one closes on backdrop tap — the ticket is precisely that iOS
+     users had no way out, and Escape does not exist on a phone. -->
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div
+	class="modal-overlay"
+	class:open={shareModal !== null}
+	onclick={(e) => {
+		if (e.target === e.currentTarget) closeShareModal();
+	}}
+>
+	{#if shareModal}
+		<div
+			class="modal share-modal"
+			role="dialog"
+			aria-modal="true"
+			aria-labelledby="share-text-title"
+			tabindex="-1"
+			onkeydown={trapShareFocus}
+		>
+			<h3 id="share-text-title">{shareModal.title}</h3>
+			{#if shareModal.error}
+				<p class="field-error" role="alert">{shareModal.text}</p>
+			{:else}
+				<textarea class="share-text-body" readonly value={shareModal.text}></textarea>
+			{/if}
+			{#if shareSheetError}
+				<p class="field-error" role="alert">{shareSheetError}</p>
+			{/if}
+			<div class="actions">
+				{#if !shareModal.error && canShareText()}
+					<button class="btn" type="button" onclick={runShareSheet}>Share…</button>
+				{/if}
+				{#if !shareModal.error}
+					<button class="btn" type="button" onclick={copyShareText}
+						>{shareCopied ? 'Copied ✓' : 'Copy'}</button
+					>
+				{/if}
+				<button class="btn primary" type="button" bind:this={shareCloseBtn} onclick={closeShareModal}
+					>Close</button
+				>
+			</div>
+		</div>
+	{/if}
+</div>
+
 <svelte:window
 	onkeydown={(e) => {
 		if (e.key === 'Escape') {
 			pendingDelete = null;
 			pendingDuplicatePlan = null;
+			if (shareModal) closeShareModal();
 		}
 	}}
 />
@@ -5963,6 +6110,22 @@
 		.form-row {
 			flex-wrap: wrap;
 		}
+	}
+	/* Share-text modal: wider than the 420px confirm modals (app.css) so a
+	   whole-trip export is readable, body scrolls internally. */
+	.share-modal {
+		width: min(560px, calc(100vw - 32px));
+		max-width: none;
+	}
+	.share-text-body {
+		width: 100%;
+		box-sizing: border-box;
+		min-height: 180px;
+		max-height: min(48vh, 420px);
+		resize: vertical;
+		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+		line-height: 1.45;
+		white-space: pre-wrap;
 	}
 	@media print {
 		/* Reveal everything folded on screen: `revert` lands on the UA default
