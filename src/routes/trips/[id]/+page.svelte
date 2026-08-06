@@ -6302,6 +6302,14 @@
 		flex: 1 1 200px;
 		min-width: 0;
 	}
+	/* The bar hugs the viewport bottom, so the picker's options must open
+	   UPWARD — dropping down clips them off the screen and only one target
+	   is ever visible (owner's iPhone report). Three classes outrank the
+	   component's own two-class .options rule. */
+	.bulk-move-target :global(.searchable-select .options) {
+		top: auto;
+		bottom: calc(100% + 4px);
+	}
 	@media print {
 		/* Reveal everything folded on screen: `revert` lands on the UA default
 		   (block / list-item), and this rule is after the screen rule so it wins. */
