@@ -18,7 +18,8 @@
 		emptyMessage = 'No matches',
 		maxResults = 50,
 		listboxId,
-		onSelect
+		onSelect,
+		clearOnEdit = true
 	}: {
 		name: string;
 		options: Option[];
@@ -34,6 +35,15 @@
 		 * undefined to a prop that has a fallback throws in runes mode.
 		 */
 		onSelect?: (value: string) => void;
+		/**
+		 * When true (default), editing away from the committed label drops the
+		 * selection — right for "stage an item" pickers where empty must mean
+		 * nothing staged. Set false for pickers whose value is already
+		 * persisted elsewhere (e.g. a saved route anchor): typing then only
+		 * filters, the committed selection survives, and Escape/blur restore
+		 * its label instead of a blank box.
+		 */
+		clearOnEdit?: boolean;
 	} = $props();
 
 	let query = $state('');
@@ -135,7 +145,8 @@
 		// Editing away from the committed label drops the selection. Without
 		// this, clearing the box leaves the old value in the hidden input and a
 		// place the user thought they had removed still gets submitted.
-		if (selectedValue && query !== selectedLabel) {
+		// (Skipped in clearOnEdit=false mode, where typing is filter-only.)
+		if (clearOnEdit && selectedValue && query !== selectedLabel) {
 			selectedValue = '';
 			onSelect?.('');
 		}

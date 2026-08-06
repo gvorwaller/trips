@@ -2107,21 +2107,26 @@
 								{:else}
 									{#if !isViewer}
 										<div class="route-tools">
-											<select
-												aria-label="route anchor"
-												value={savedPlanAnchors[plan.id] ?? plan.anchor_source ?? 'none'}
-												onchange={(e) =>
-													setSavedPlanAnchor(
-														plan.id,
-														plan.optional_date,
-														e.currentTarget.value,
-														anchor
-													)}
-											>
-												{#each anchorOptions(plan.optional_date, anchor) as anchorOption (anchorOption.value)}
-													<option value={anchorOption.value}>{anchorOption.label}</option>
-												{/each}
-											</select>
+											<!-- One-way selectedValue + onSelect: binding into the keyed
+											     savedPlanAnchors record throws when the entry is undefined
+											     (devlog 2026-07-28). clearOnEdit=false: the anchor is
+											     persisted state, so typing only filters — the committed
+											     pick survives and Escape/blur restore its label. -->
+											<SearchableSelect
+												name={`route-anchor-${plan.id}`}
+												selectedValue={savedPlanAnchors[plan.id] ??
+													plan.anchor_source ??
+													'none'}
+												clearOnEdit={false}
+												onSelect={(value) =>
+													setSavedPlanAnchor(plan.id, plan.optional_date, value, anchor)}
+												options={anchorOptions(plan.optional_date, anchor)}
+												ariaLabel="route anchor"
+												placeholder="Search anchor…"
+												emptyMessage="No anchors match"
+												maxResults={500}
+												listboxId={`route-anchor-options-${plan.id}`}
+											/>
 											<button
 												class="btn small"
 												type="button"
@@ -2571,11 +2576,19 @@
 					<div class="builder-step">
 						<div class="builder-step-label">3. Review &amp; reorder</div>
 						<div class="route-tools">
-							<select bind:value={builderAnchor} aria-label="route anchor">
-								{#each anchorOptions(dayPlanDate || null) as anchor (anchor.value)}
-									<option value={anchor.value}>{anchor.label}</option>
-								{/each}
-							</select>
+							<!-- clearOnEdit=false: builderAnchor always holds a real option
+							     value ('none' = no anchor); typing only filters. -->
+							<SearchableSelect
+								name="dayplan-builder-anchor"
+								bind:selectedValue={builderAnchor}
+								clearOnEdit={false}
+								options={anchorOptions(dayPlanDate || null)}
+								ariaLabel="route anchor"
+								placeholder="Search anchor…"
+								emptyMessage="No anchors match"
+								maxResults={500}
+								listboxId="dayplan-builder-anchor-options"
+							/>
 							<button
 								class="btn small primary"
 								type="button"
@@ -5322,6 +5335,13 @@
 		/* Measured 298x25.5 — selects are controls too. 16px per cs.md. */
 		min-height: 44px;
 		font-size: 16px;
+	}
+	/* The anchor combobox takes the slot the native select had; its input
+	   gets 44px/16px from the global input rule. */
+	.route-tools :global(.searchable-select) {
+		flex: 1 1 180px;
+		min-width: 0;
+		max-width: min(320px, 100%);
 	}
 	.route-status {
 		color: var(--muted);
